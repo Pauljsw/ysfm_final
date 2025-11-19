@@ -608,9 +608,9 @@ if __name__ == '__main__':
     from .utils import setup_logging
 
     parser = argparse.ArgumentParser(description='Enhanced 3D mask clustering with direction awareness')
-    parser.add_argument('--masks-3d', required=True,
+    parser.add_argument('--masks-3d-json', '--masks-3d', required=True, dest='masks_3d',
                        help='Input masks_3d JSON')
-    parser.add_argument('--output', required=True,
+    parser.add_argument('--output-json', '--output', required=True, dest='output',
                        help='Output clusters JSON')
 
     # Direction
@@ -624,14 +624,18 @@ if __name__ == '__main__':
                        help='Use dynamic threshold based on BBox size (default: True)')
 
     # Connectivity
-    parser.add_argument('--gap-threshold', type=float, default=0.1,
+    parser.add_argument('--max-gap-distance', '--gap-threshold', type=float, default=0.1, dest='gap_threshold',
                        help='Gap threshold for connectivity (meters, default: 0.1)')
 
     # Score
-    parser.add_argument('--proximity-threshold', type=float, default=0.05,
+    parser.add_argument('--close-point-threshold', '--proximity-threshold', type=float, default=0.05, dest='proximity_threshold',
                        help='Point proximity threshold (meters, default: 0.05)')
-    parser.add_argument('--overlap-threshold', type=float, default=0.3,
+    parser.add_argument('--min-close-ratio', '--overlap-threshold', type=float, default=0.3, dest='overlap_threshold',
                        help='Overlap score threshold (0-1, default: 0.3)')
+
+    # BBox
+    parser.add_argument('--min-bbox-iou', type=float, default=0.05,
+                       help='Minimum BBox IoU for merging (0-1, default: 0.05)')
 
     parser.add_argument('--log-level', default='INFO',
                        choices=['DEBUG', 'INFO', 'WARNING', 'ERROR'])
@@ -654,7 +658,7 @@ if __name__ == '__main__':
         'axis_alignment_threshold': np.cos(np.radians(30)),
 
         # BBox
-        'min_bbox_iou': 0.05,
+        'min_bbox_iou': args.min_bbox_iou,
 
         # Point
         'proximity_threshold': args.proximity_threshold,
