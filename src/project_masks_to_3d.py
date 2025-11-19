@@ -230,7 +230,7 @@ def project_mask_to_3d(
 
     # Backproject to 3D
     R = np.array(pose['R'])
-    t = np.array(pose['t'])
+    t = np.array(pose['t']).flatten()  # Ensure (3,) shape
 
     points_3d_world = []
     valid_count = 0
