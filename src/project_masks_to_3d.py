@@ -375,6 +375,7 @@ def run_projection(
 
     all_masks_3d = []
     skipped_count = 0
+    filtered_count = 0  # Class filtering
     total_masks = 0
 
     for mask_file in tqdm(mask_files, desc="Processing masks"):
@@ -411,6 +412,13 @@ def run_projection(
 
         # Process each mask
         for mask_idx, mask in enumerate(masks):
+            # Filter by class
+            filter_classes = config.get('filter_classes', None)
+            if filter_classes is not None:
+                if mask['class'] not in filter_classes:
+                    filtered_count += 1
+                    continue
+
             mask_3d = project_mask_to_3d(
                 mask,
                 depth_map,
@@ -431,10 +439,14 @@ def run_projection(
     logger.info("Projection Statistics")
     logger.info("=" * 80)
     logger.info(f"  Total masks: {total_masks}")
+
+    if filtered_count > 0:
+        logger.info(f"  Filtered by class: {filtered_count} ({filtered_count/total_masks*100:.1f}%)")
+
     logger.info(f"  Valid 3D masks: {len(all_masks_3d)}")
 
     if total_masks > 0:
-        logger.info(f"  Skipped: {skipped_count} ({skipped_count/total_masks*100:.1f}%)")
+        logger.info(f"  Skipped (insufficient points): {skipped_count} ({skipped_count/total_masks*100:.1f}%)")
     else:
         logger.info(f"  Skipped: {skipped_count} (0.0%)")
 
@@ -456,6 +468,7 @@ def run_projection(
     result = {
         'metadata': {
             'total_input_masks': total_masks,
+            'filtered_masks': filtered_count,
             'valid_3d_masks': len(all_masks_3d),
             'skipped_masks': skipped_count,
             'mean_coverage': float(np.mean(coverages)) if len(all_masks_3d) > 0 else 0.0,
@@ -494,6 +507,8 @@ if __name__ == '__main__':
                        help='Nearest depth search radius (pixels)')
     parser.add_argument('--min-valid-points', type=int, default=5,
                        help='Minimum valid 3D points')
+    parser.add_argument('--filter-classes', nargs='+', default=['crack'],
+                       help='Classes to process (default: crack only). Use "all" to process all classes.')
     parser.add_argument('--log-level', default='INFO',
                        choices=['DEBUG', 'INFO', 'WARNING', 'ERROR'])
 
@@ -501,11 +516,18 @@ if __name__ == '__main__':
 
     setup_logging(args.log_level)
 
+    # Handle filter_classes
+    filter_classes = None  # Process all classes
+    if args.filter_classes and args.filter_classes != ['all']:
+        filter_classes = args.filter_classes
+        logger.info(f"Class filtering enabled: {filter_classes}")
+
     config = {
         'polygon_sampling_spacing': args.polygon_spacing,
         'depth_search_radius': args.depth_search_radius,
         'min_valid_points': args.min_valid_points,
-        'warn_low_coverage': 0.25
+        'warn_low_coverage': 0.25,
+        'filter_classes': filter_classes
     }
 
     try:
