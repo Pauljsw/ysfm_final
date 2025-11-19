@@ -239,6 +239,10 @@ def project_mask_to_3d(
     H, W = depth_map.shape
 
     for (u, v) in sampled_pixels:
+        # Skip out-of-bounds pixels (polygon may extend beyond image)
+        if not (0 <= v < H and 0 <= u < W):
+            continue
+
         # Get depth (with nearest fallback)
         depth = get_nearest_valid_depth(
             depth_map,
@@ -251,8 +255,8 @@ def project_mask_to_3d(
 
         valid_count += 1
 
-        # Check if fallback was used (bounds-safe)
-        if not (0 <= v < H and 0 <= u < W) or depth_map[v, u] <= 0:
+        # Check if fallback was used (original pixel had no depth)
+        if depth_map[v, u] <= 0:
             fallback_count += 1
 
         # Backproject
