@@ -374,12 +374,16 @@ def run_projection(
     for mask_file in tqdm(mask_files, desc="Processing masks"):
         image_id = mask_file.stem
 
-        # Check if pose exists
+        # Check if pose exists (poses.json may use .png extension)
+        image_key = image_id
         if image_id not in poses:
-            logger.warning(f"No pose for {image_id}, skipping")
-            continue
+            # Try with .png extension
+            image_key = f"{image_id}.png"
+            if image_key not in poses:
+                logger.warning(f"No pose for {image_id}, skipping")
+                continue
 
-        pose = poses[image_id]
+        pose = poses[image_key]
 
         # Load YOLO masks
         with open(mask_file, 'r') as f:
@@ -422,15 +426,22 @@ def run_projection(
     logger.info("=" * 80)
     logger.info(f"  Total masks: {total_masks}")
     logger.info(f"  Valid 3D masks: {len(all_masks_3d)}")
-    logger.info(f"  Skipped: {skipped_count} ({skipped_count/total_masks*100:.1f}%)")
+
+    if total_masks > 0:
+        logger.info(f"  Skipped: {skipped_count} ({skipped_count/total_masks*100:.1f}%)")
+    else:
+        logger.info(f"  Skipped: {skipped_count} (0.0%)")
 
     # Coverage statistics
-    coverages = [m['coverage'] for m in all_masks_3d]
-    fallback_ratios = [m['fallback_ratio'] for m in all_masks_3d]
+    if len(all_masks_3d) > 0:
+        coverages = [m['coverage'] for m in all_masks_3d]
+        fallback_ratios = [m['fallback_ratio'] for m in all_masks_3d]
 
-    logger.info(f"  Mean coverage: {np.mean(coverages)*100:.1f}%")
-    logger.info(f"  Median coverage: {np.median(coverages)*100:.1f}%")
-    logger.info(f"  Mean fallback ratio: {np.mean(fallback_ratios)*100:.1f}%")
+        logger.info(f"  Mean coverage: {np.mean(coverages)*100:.1f}%")
+        logger.info(f"  Median coverage: {np.median(coverages)*100:.1f}%")
+        logger.info(f"  Mean fallback ratio: {np.mean(fallback_ratios)*100:.1f}%")
+    else:
+        logger.warning("  No valid 3D masks generated!")
 
     # Save
     output_path = Path(output_json)
@@ -441,7 +452,7 @@ def run_projection(
             'total_input_masks': total_masks,
             'valid_3d_masks': len(all_masks_3d),
             'skipped_masks': skipped_count,
-            'mean_coverage': float(np.mean(coverages)),
+            'mean_coverage': float(np.mean(coverages)) if len(all_masks_3d) > 0 else 0.0,
             'config': config
         },
         'masks': all_masks_3d
