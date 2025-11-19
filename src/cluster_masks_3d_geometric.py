@@ -1,10 +1,12 @@
 """
-3D Mask Clustering using Geometric Overlap
+3D Mask Clustering using Geometric Overlap (Enhanced)
 
 Clusters 3D masks based on geometric properties:
-- Centroid distance (fast rejection)
-- BBox overlap (medium rejection)
-- Point-to-point distance (final verification)
+- Principal axis (direction similarity) - prevents cross-crack merging
+- Dynamic centroid distance - handles long cracks
+- Gap detection - handles fragmented cracks
+- BBox overlap - spatial proximity
+- Point-to-point distance - fine-grained verification
 
 Usage:
     python -m src.cluster_masks_3d_geometric \
@@ -12,7 +14,8 @@ Usage:
         --output outputs/mask_clusters.json \
         --max-centroid-distance 0.5 \
         --proximity-threshold 0.05 \
-        --overlap-threshold 0.3
+        --overlap-threshold 0.3 \
+        --min-angle-similarity 0.707
 """
 
 import numpy as np
@@ -25,8 +28,58 @@ from tqdm import tqdm
 logger = logging.getLogger(__name__)
 
 
+def compute_principal_axis(points_3d: np.ndarray) -> np.ndarray:
+    """
+    Compute principal axis (main direction) using PCA.
+
+    Args:
+        points_3d: (N, 3) 3D points
+
+    Returns:
+        axis: (3,) unit vector of principal direction
+    """
+    if len(points_3d) < 2:
+        return np.array([1.0, 0.0, 0.0])  # Default
+
+    # Center points
+    centroid = np.mean(points_3d, axis=0)
+    centered = points_3d - centroid
+
+    # SVD
+    try:
+        U, S, Vt = np.linalg.svd(centered, full_matrices=False)
+
+        # First principal component (largest variance direction)
+        principal_axis = Vt[0]
+
+        return principal_axis
+    except np.linalg.LinAlgError:
+        # Degenerate case
+        return np.array([1.0, 0.0, 0.0])
+
+
+def compute_angle_similarity(axis1: np.ndarray, axis2: np.ndarray) -> float:
+    """
+    Compute angle similarity between two direction vectors.
+
+    Args:
+        axis1, axis2: Direction vectors (unit vectors)
+
+    Returns:
+        similarity: Absolute cosine similarity (0~1)
+                   1.0 = parallel, 0.0 = perpendicular
+    """
+    # Absolute cosine (direction-agnostic)
+    cos_angle = abs(np.dot(axis1, axis2))
+
+    # Clamp to [0, 1]
+    cos_angle = np.clip(cos_angle, 0.0, 1.0)
+
+    return cos_angle
+
+
 class Cluster:
-    """3D Mask Cluster"""
+    """3D Mask Cluster with principal axis"""
 
     def __init__(self, initial_mask: Dict):
         """Initialize cluster with first mask"""
@@ -39,7 +92,7 @@ class Cluster:
         self._update_metadata()
 
     def _update_metadata(self):
-        """Update cluster metadata (centroid, bbox, points)"""
+        """Update cluster metadata (centroid, bbox, points, principal axis)"""
         # Collect all points
         all_points = []
         for mask in self.masks:
@@ -59,6 +112,9 @@ class Cluster:
             'min': self.bbox_min,
             'max': self.bbox_max
         }
+
+        # Principal axis
+        self.principal_axis = compute_principal_axis(self.all_points)
 
     def get_sample_points(self, max_points: int = 500) -> np.ndarray:
         """Get sampled points (for performance)"""
@@ -88,6 +144,7 @@ class Cluster:
                 'min': self.bbox_min.tolist(),
                 'max': self.bbox_max.tolist()
             },
+            'principal_axis': self.principal_axis.tolist(),
             'mean_confidence': float(np.mean([m['confidence'] for m in self.masks]))
         }
 
@@ -133,43 +190,119 @@ def compute_bbox_iou_3d(bbox1: Dict, bbox2: Dict) -> float:
     return iou
 
 
-def compute_overlap_score(mask_3d: Dict, cluster: Cluster, config: Dict) -> float:
+def get_dynamic_centroid_threshold(mask_3d: Dict, cluster: Cluster, config: Dict) -> float:
     """
-    Compute geometric overlap score between mask and cluster.
+    Compute dynamic centroid threshold based on BBox size.
 
-    Multi-stage rejection for performance:
-    1. Centroid distance (O(1)) - quick rejection
-    2. BBox overlap (O(1)) - medium rejection
-    3. Point-level distance (O(n*m)) - final verification
+    Larger cracks → larger threshold (handles long fragmented cracks)
 
     Args:
-        mask_3d: 3D mask dict
+        mask_3d: Mask dict
         cluster: Cluster object
         config: Configuration dict
 
     Returns:
-        score: 0.0 ~ 1.0
+        dynamic_threshold: Adjusted centroid threshold (meters)
+    """
+    if not config.get('use_dynamic_threshold', True):
+        return config.get('max_centroid_distance', 0.5)
+
+    # Mask BBox size
+    mask_bbox_min = np.array(mask_3d['bbox_3d']['min'])
+    mask_bbox_max = np.array(mask_3d['bbox_3d']['max'])
+    mask_bbox_size = np.linalg.norm(mask_bbox_max - mask_bbox_min)
+
+    # Cluster BBox size
+    cluster_bbox_size = np.linalg.norm(cluster.bbox_max - cluster.bbox_min)
+
+    # Use larger BBox
+    max_bbox_size = max(mask_bbox_size, cluster_bbox_size)
+
+    # Dynamic threshold: 70% of BBox diagonal
+    # (but don't exceed max if specified)
+    dynamic_threshold = max_bbox_size * 0.7
+
+    # Apply max limit if set
+    max_limit = config.get('max_centroid_distance_limit', None)
+    if max_limit is not None:
+        dynamic_threshold = min(dynamic_threshold, max_limit)
+
+    return dynamic_threshold
+
+
+def compute_min_gap(mask_3d: Dict, cluster: Cluster) -> float:
+    """
+    Compute minimum gap (distance) between mask and cluster.
+
+    Args:
+        mask_3d: Mask dict
+        cluster: Cluster object
+
+    Returns:
+        min_gap: Minimum distance (meters)
+    """
+    mask_points = np.array(mask_3d['points_3d'])
+    cluster_points = cluster.get_sample_points(max_points=500)
+
+    # Pairwise distance
+    distances = np.linalg.norm(
+        mask_points[:, None, :] - cluster_points[None, :, :],
+        axis=2
+    )
+
+    # Minimum distance
+    min_gap = distances.min()
+
+    return min_gap
+
+
+def check_axis_aligned(mask_3d: Dict, cluster: Cluster, config: Dict) -> bool:
+    """
+    Check if mask is aligned with cluster's principal axis.
+
+    Useful for detecting long cracks that are far apart in centroid
+    but aligned in direction.
+
+    Args:
+        mask_3d: Mask dict
+        cluster: Cluster object
+        config: Configuration dict
+
+    Returns:
+        is_aligned: True if aligned along principal axis
     """
     mask_centroid = np.array(mask_3d['centroid_3d'])
-    mask_bbox = mask_3d['bbox_3d']
 
-    # === STAGE 1: Centroid Distance (fastest) ===
-    centroid_dist = np.linalg.norm(mask_centroid - cluster.centroid_3d)
+    # Vector from cluster to mask
+    connection_vec = mask_centroid - cluster.centroid_3d
+    connection_vec_norm = np.linalg.norm(connection_vec)
 
-    max_centroid_distance = config.get('max_centroid_distance', 0.5)
+    if connection_vec_norm < 1e-6:
+        return True  # Same location
 
-    if centroid_dist > max_centroid_distance:
-        return 0.0  # Too far apart
+    connection_vec /= connection_vec_norm
 
-    # === STAGE 2: BBox Overlap (fast) ===
-    bbox_iou = compute_bbox_iou_3d(mask_bbox, cluster.bbox_3d)
+    # Check alignment with cluster's principal axis
+    alignment = abs(np.dot(connection_vec, cluster.principal_axis))
 
-    min_bbox_iou = config.get('min_bbox_iou', 0.05)
+    # Threshold: cos(30°) ≈ 0.866
+    alignment_threshold = config.get('axis_alignment_threshold', np.cos(np.radians(30)))
 
-    if bbox_iou < min_bbox_iou:
-        return 0.0  # No bbox overlap
+    return alignment > alignment_threshold
 
-    # === STAGE 3: Point-level Distance (slow, but only ~5% reach here) ===
+
+def compute_close_ratio(mask_3d: Dict, cluster: Cluster, config: Dict) -> float:
+    """
+    Compute ratio of mask points close to cluster points.
+
+    Args:
+        mask_3d: Mask dict
+        cluster: Cluster object
+        config: Configuration dict
+
+    Returns:
+        close_ratio: Ratio of points within proximity threshold (0~1)
+    """
     mask_points = np.array(mask_3d['points_3d'])
 
     # Sample for performance
@@ -182,7 +315,6 @@ def compute_overlap_score(mask_3d: Dict, cluster: Cluster, config: Dict) -> floa
     cluster_sample = cluster.get_sample_points(max_points=500)
 
     # Pairwise distance (broadcasting)
-    # Shape: (N_mask, 1, 3) - (1, N_cluster, 3) = (N_mask, N_cluster, 3)
     distances = np.linalg.norm(
         mask_sample[:, None, :] - cluster_sample[None, :, :],
         axis=2
@@ -195,18 +327,113 @@ def compute_overlap_score(mask_3d: Dict, cluster: Cluster, config: Dict) -> floa
     proximity_threshold = config.get('proximity_threshold', 0.05)
     close_ratio = np.mean(min_distances < proximity_threshold)
 
-    # === FINAL SCORE: Weighted combination ===
-    bbox_weight = config.get('bbox_weight', 0.3)
-    point_weight = config.get('point_weight', 0.7)
+    return close_ratio
 
-    score = bbox_weight * bbox_iou + point_weight * close_ratio
+
+def compute_overlap_score(mask_3d: Dict, cluster: Cluster, config: Dict) -> float:
+    """
+    Compute enhanced geometric overlap score.
+
+    Multi-criteria decision tree:
+    1. Direction check (angle similarity) - prevents cross-crack merging
+    2. Spatial distance (centroid + gap + axis-aligned)
+    3. BBox overlap
+    4. Point-level proximity
+
+    Args:
+        mask_3d: 3D mask dict
+        cluster: Cluster object
+        config: Configuration dict
+
+    Returns:
+        score: 0.0 ~ 1.0
+    """
+    mask_centroid = np.array(mask_3d['centroid_3d'])
+    mask_bbox = mask_3d['bbox_3d']
+
+    # === 1. PRINCIPAL AXIS (Direction Check) ===
+    mask_points = np.array(mask_3d['points_3d'])
+    mask_axis = compute_principal_axis(mask_points)
+    cluster_axis = cluster.principal_axis
+
+    angle_similarity = compute_angle_similarity(mask_axis, cluster_axis)
+
+    # Early rejection: Different direction
+    min_angle_similarity = config.get('min_angle_similarity', np.cos(np.radians(45)))
+
+    if angle_similarity < min_angle_similarity:
+        logger.debug(f"  Rejected: angle_similarity={angle_similarity:.3f} < {min_angle_similarity:.3f}")
+        return 0.0  # Cross-crack or different direction
+
+    # === 2. CENTROID DISTANCE (with dynamic threshold) ===
+    dynamic_threshold = get_dynamic_centroid_threshold(mask_3d, cluster, config)
+    centroid_dist = np.linalg.norm(mask_centroid - cluster.centroid_3d)
+
+    logger.debug(f"  centroid_dist={centroid_dist:.3f}m, dynamic_threshold={dynamic_threshold:.3f}m")
+
+    # === 3. SPATIAL CONNECTIVITY CHECK ===
+    if centroid_dist > dynamic_threshold:
+        # Centroid far, but check connectivity
+
+        # 3a. Gap detection
+        min_gap = compute_min_gap(mask_3d, cluster)
+        gap_threshold = config.get('gap_threshold', 0.1)
+
+        logger.debug(f"  min_gap={min_gap:.3f}m, gap_threshold={gap_threshold:.3f}m")
+
+        # 3b. Axis alignment
+        is_aligned = check_axis_aligned(mask_3d, cluster, config)
+
+        logger.debug(f"  is_aligned={is_aligned}")
+
+        # Reject if both fail
+        if min_gap > gap_threshold and not is_aligned:
+            logger.debug(f"  Rejected: centroid far, gap large, not aligned")
+            return 0.0
+
+        logger.debug(f"  Accepted by gap or alignment (centroid override)")
+
+    # === 4. BBOX OVERLAP ===
+    bbox_iou = compute_bbox_iou_3d(mask_bbox, cluster.bbox_3d)
+
+    logger.debug(f"  bbox_iou={bbox_iou:.3f}")
+
+    min_bbox_iou = config.get('min_bbox_iou', 0.05)
+
+    if bbox_iou < min_bbox_iou:
+        # BBox doesn't overlap, but check axis-aligned
+        if not check_axis_aligned(mask_3d, cluster, config):
+            logger.debug(f"  Rejected: bbox_iou low and not aligned")
+            return 0.0
+
+        logger.debug(f"  Accepted by alignment (bbox override)")
+
+    # === 5. POINT-LEVEL PROXIMITY ===
+    close_ratio = compute_close_ratio(mask_3d, cluster, config)
+
+    logger.debug(f"  close_ratio={close_ratio:.3f}")
+
+    # === 6. FINAL SCORE (Weighted combination) ===
+    weights = config.get('score_weights', {
+        'angle': 0.2,
+        'bbox': 0.2,
+        'point': 0.6
+    })
+
+    score = (
+        weights['angle'] * angle_similarity +
+        weights['bbox'] * bbox_iou +
+        weights['point'] * close_ratio
+    )
+
+    logger.debug(f"  final_score={score:.3f}")
 
     return score
 
 
 def cluster_masks_geometric(masks_3d: List[Dict], config: Optional[Dict] = None) -> List[Cluster]:
     """
-    Cluster 3D masks using geometric overlap.
+    Cluster 3D masks using enhanced geometric overlap.
 
     Greedy clustering algorithm:
     - Process masks sequentially
@@ -222,39 +449,65 @@ def cluster_masks_geometric(masks_3d: List[Dict], config: Optional[Dict] = None)
     """
     if config is None:
         config = {
+            # Direction
+            'min_angle_similarity': np.cos(np.radians(45)),
+
+            # Distance
             'max_centroid_distance': 0.5,
+            'use_dynamic_threshold': True,
+            'max_centroid_distance_limit': None,
+
+            # Connectivity
+            'gap_threshold': 0.1,
+            'axis_alignment_threshold': np.cos(np.radians(30)),
+
+            # BBox
             'min_bbox_iou': 0.05,
+
+            # Point
             'proximity_threshold': 0.05,
+
+            # Score
             'overlap_threshold': 0.3,
-            'bbox_weight': 0.3,
-            'point_weight': 0.7
+            'score_weights': {
+                'angle': 0.2,
+                'bbox': 0.2,
+                'point': 0.6
+            }
         }
 
-    logger.info("Starting geometric clustering...")
-    logger.info(f"  Config: {config}")
+    logger.info("Starting enhanced geometric clustering...")
+    logger.info(f"  Config: {json.dumps(config, indent=2, default=str)}")
 
     clusters = []
 
-    for mask_3d in tqdm(masks_3d, desc="Clustering masks"):
+    for mask_idx, mask_3d in enumerate(tqdm(masks_3d, desc="Clustering masks")):
         best_cluster = None
         best_score = 0.0
 
+        logger.debug(f"\nMask {mask_idx}: {mask_3d['image_id']}/{mask_3d['mask_id']}")
+
         # Find best matching cluster
-        for cluster in clusters:
+        for cluster_idx, cluster in enumerate(clusters):
+            logger.debug(f"Checking cluster {cluster_idx}:")
+
             score = compute_overlap_score(mask_3d, cluster, config)
 
             if score > best_score:
                 best_score = score
                 best_cluster = cluster
+                logger.debug(f"  → New best score: {score:.3f}")
 
         # Merge or create new
         overlap_threshold = config.get('overlap_threshold', 0.3)
 
         if best_score > overlap_threshold:
             # Merge to existing cluster
+            logger.debug(f"→ Merged to cluster (score={best_score:.3f})")
             best_cluster.add_mask(mask_3d)
         else:
             # Create new cluster
+            logger.debug(f"→ Created new cluster (best_score={best_score:.3f} < {overlap_threshold})")
             new_cluster = Cluster(mask_3d)
             clusters.append(new_cluster)
 
@@ -278,16 +531,22 @@ def run_clustering(
     """
     if config is None:
         config = {
+            'min_angle_similarity': np.cos(np.radians(45)),
             'max_centroid_distance': 0.5,
+            'use_dynamic_threshold': True,
+            'gap_threshold': 0.1,
             'min_bbox_iou': 0.05,
             'proximity_threshold': 0.05,
             'overlap_threshold': 0.3,
-            'bbox_weight': 0.3,
-            'point_weight': 0.7
+            'score_weights': {
+                'angle': 0.2,
+                'bbox': 0.2,
+                'point': 0.6
+            }
         }
 
     logger.info("=" * 80)
-    logger.info("3D Mask Geometric Clustering")
+    logger.info("3D Mask Enhanced Geometric Clustering")
     logger.info("=" * 80)
 
     # Load 3D masks
@@ -336,7 +595,7 @@ def run_clustering(
     }
 
     with open(output_json, 'w') as f:
-        json.dump(result, f, indent=2)
+        json.dump(result, f, indent=2, default=str)
 
     logger.info(f"Saved clusters: {output_json}")
     logger.info("=" * 80)
@@ -348,17 +607,32 @@ if __name__ == '__main__':
     import argparse
     from .utils import setup_logging
 
-    parser = argparse.ArgumentParser(description='Cluster 3D masks using geometric overlap')
+    parser = argparse.ArgumentParser(description='Enhanced 3D mask clustering with direction awareness')
     parser.add_argument('--masks-3d', required=True,
                        help='Input masks_3d JSON')
     parser.add_argument('--output', required=True,
                        help='Output clusters JSON')
+
+    # Direction
+    parser.add_argument('--min-angle-similarity', type=float, default=0.707,
+                       help='Minimum angle similarity (cos, default: 0.707 = 45deg)')
+
+    # Distance
     parser.add_argument('--max-centroid-distance', type=float, default=0.5,
                        help='Maximum centroid distance (meters, default: 0.5)')
+    parser.add_argument('--use-dynamic-threshold', action='store_true', default=True,
+                       help='Use dynamic threshold based on BBox size (default: True)')
+
+    # Connectivity
+    parser.add_argument('--gap-threshold', type=float, default=0.1,
+                       help='Gap threshold for connectivity (meters, default: 0.1)')
+
+    # Score
     parser.add_argument('--proximity-threshold', type=float, default=0.05,
                        help='Point proximity threshold (meters, default: 0.05)')
     parser.add_argument('--overlap-threshold', type=float, default=0.3,
                        help='Overlap score threshold (0-1, default: 0.3)')
+
     parser.add_argument('--log-level', default='INFO',
                        choices=['DEBUG', 'INFO', 'WARNING', 'ERROR'])
 
@@ -367,15 +641,37 @@ if __name__ == '__main__':
     setup_logging(args.log_level)
 
     config = {
+        # Direction
+        'min_angle_similarity': args.min_angle_similarity,
+
+        # Distance
         'max_centroid_distance': args.max_centroid_distance,
+        'use_dynamic_threshold': args.use_dynamic_threshold,
+        'max_centroid_distance_limit': None,
+
+        # Connectivity
+        'gap_threshold': args.gap_threshold,
+        'axis_alignment_threshold': np.cos(np.radians(30)),
+
+        # BBox
         'min_bbox_iou': 0.05,
+
+        # Point
         'proximity_threshold': args.proximity_threshold,
+
+        # Score
         'overlap_threshold': args.overlap_threshold,
-        'bbox_weight': 0.3,
-        'point_weight': 0.7
+        'score_weights': {
+            'angle': 0.2,
+            'bbox': 0.2,
+            'point': 0.6
+        }
     }
 
     try:
+        with open(args.masks_3d, 'r') as f:
+            data = json.load(f)
+
         clusters = run_clustering(
             args.masks_3d,
             args.output,
@@ -385,6 +681,7 @@ if __name__ == '__main__':
         print(f"\n✅ Clustering complete!")
         print(f"   Input masks: {len(data['masks'])}")
         print(f"   Output clusters: {len(clusters)}")
+        print(f"   Reduction: {(1 - len(clusters)/len(data['masks']))*100:.1f}%")
         print(f"   Output: {args.output}")
 
     except Exception as e:
