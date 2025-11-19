@@ -168,8 +168,12 @@ def create_clusters_ply(
 
     logger.info(f"Total points: {len(all_points):,}")
 
-    # Save PLY
-    save_ply_binary(output_ply, all_points, all_colors)
+    # Save PLY (optional)
+    if output_ply is not None:
+        save_ply_binary(output_ply, all_points, all_colors)
+        logger.info(f"Saved PLY: {output_ply} ({len(all_points):,} points)")
+    else:
+        logger.debug("output_ply=None, skipping save (returning points only)")
 
     logger.info("=" * 80)
 
@@ -280,7 +284,7 @@ def run_visualization(
     logger.info("3D Cluster Visualization")
     logger.info("=" * 80)
 
-    # Create clusters PLY
+    # Create clusters PLY (always)
     cluster_xyz, cluster_rgb = create_clusters_ply(
         clusters_json,
         masks_3d_json,
