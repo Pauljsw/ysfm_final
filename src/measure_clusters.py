@@ -596,6 +596,11 @@ def calculate_direct_scan_width(
     for idx in sample_indices:
         r, c = rows[idx], cols[idx]
 
+        # Check if center pixel (skeleton point) is dark enough
+        # If skeleton is not on a dark crack pixel, skip this sample
+        if grayscale[r, c] > dark_threshold:
+            continue
+
         # Get scale at this pixel with fallback
         D = get_scale_with_fallback(scale_map, r, c)
         if D == 0:
@@ -653,10 +658,8 @@ def calculate_direct_scan_width(
 
         # Total width in pixels (including center)
         width_pixels = positive_dist + negative_dist + 1
-
-        if width_pixels > 1:  # At least some width detected
-            width_mm = width_pixels * D
-            widths.append(width_mm)
+        width_mm = width_pixels * D
+        widths.append(width_mm)
 
     if widths:
         return float(np.mean(widths)), float(np.max(widths))
