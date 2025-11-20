@@ -24,6 +24,70 @@ from sklearn.cluster import DBSCAN
 logger = logging.getLogger(__name__)
 
 
+def generate_cluster_colors(n_clusters: int) -> List[Tuple[int, int, int]]:
+    """
+    Generate distinct colors for clusters using HSV color space.
+
+    Args:
+        n_clusters: Number of clusters
+
+    Returns:
+        List of RGB tuples
+    """
+    if n_clusters == 0:
+        return []
+
+    colors = []
+    for i in range(n_clusters):
+        hue = i / n_clusters
+
+        # HSV to RGB conversion
+        h = hue * 6
+        c = 1.0
+        x = 1 - abs(h % 2 - 1)
+
+        if h < 1:
+            r, g, b = c, x, 0
+        elif h < 2:
+            r, g, b = x, c, 0
+        elif h < 3:
+            r, g, b = 0, c, x
+        elif h < 4:
+            r, g, b = 0, x, c
+        elif h < 5:
+            r, g, b = x, 0, c
+        else:
+            r, g, b = c, 0, x
+
+        colors.append((int(r * 255), int(g * 255), int(b * 255)))
+
+    return colors
+
+
+def save_ply_binary(filename: str, xyz: np.ndarray, rgb: np.ndarray):
+    """Save point cloud as binary PLY."""
+    output_path = Path(filename)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+
+    with open(filename, 'wb') as f:
+        header = f"""ply
+format binary_little_endian 1.0
+element vertex {len(xyz)}
+property float x
+property float y
+property float z
+property uchar red
+property uchar green
+property uchar blue
+end_header
+"""
+        f.write(header.encode('ascii'))
+
+        for i in range(len(xyz)):
+            f.write(xyz[i].astype(np.float32).tobytes())
+            f.write(rgb[i].astype(np.uint8).tobytes())
+
+
 def compute_principal_axis(points: np.ndarray) -> np.ndarray:
     """
     Compute principal axis (main direction) using PCA.
@@ -52,7 +116,9 @@ def run_dbscan_clustering(
     input_json: str,
     output_json: str,
     eps: float = 0.05,
-    min_samples: int = 10
+    min_samples: int = 10,
+    output_ply: str = None,
+    show_noise: bool = False
 ):
     """
     Run DBSCAN clustering on crack points.
@@ -62,6 +128,8 @@ def run_dbscan_clustering(
         output_json: Output crack_clusters.json path
         eps: DBSCAN epsilon (max distance between points in cluster)
         min_samples: DBSCAN minimum samples per cluster
+        output_ply: Output PLY path for visualization (optional)
+        show_noise: Whether to show noise points in PLY (gray)
     """
     logger.info("=" * 80)
     logger.info("DBSCAN Clustering for Crack Points")
@@ -208,6 +276,50 @@ def run_dbscan_clustering(
         json.dump(output_data, f, indent=2)
 
     logger.info(f"\nSaved clusters: {output_json}")
+
+    # Generate PLY visualization if requested
+    if output_ply:
+        logger.info(f"\nGenerating PLY visualization...")
+
+        # Build point_id to xyz lookup
+        point_lookup = {p['point_id']: np.array(p['xyz']) for p in crack_points}
+
+        # Generate colors
+        colors = generate_cluster_colors(len(clusters))
+
+        # Collect all points with colors
+        all_xyz = []
+        all_rgb = []
+        clustered_point_ids = set()
+
+        for cluster_idx, cluster in enumerate(clusters):
+            point_ids = cluster['point_ids']
+            color = colors[cluster_idx % len(colors)] if colors else (255, 0, 0)
+
+            for point_id in point_ids:
+                if point_id in point_lookup:
+                    all_xyz.append(point_lookup[point_id])
+                    all_rgb.append(color)
+                    clustered_point_ids.add(point_id)
+
+        # Add noise points if requested
+        if show_noise:
+            noise_color = (128, 128, 128)
+            noise_count = 0
+            for point in crack_points:
+                if point['point_id'] not in clustered_point_ids:
+                    all_xyz.append(np.array(point['xyz']))
+                    all_rgb.append(noise_color)
+                    noise_count += 1
+            logger.info(f"  Added {noise_count} noise points (gray)")
+
+        # Convert and save
+        all_xyz = np.array(all_xyz)
+        all_rgb = np.array(all_rgb, dtype=np.uint8)
+
+        save_ply_binary(output_ply, all_xyz, all_rgb)
+        logger.info(f"  Saved PLY: {output_ply} ({len(all_xyz)} points)")
+
     logger.info("=" * 80)
 
     return clusters
@@ -228,6 +340,10 @@ if __name__ == '__main__':
                        help='DBSCAN epsilon - max distance between points (meters, default: 0.05)')
     parser.add_argument('--min-samples', type=int, default=10,
                        help='DBSCAN min samples per cluster (default: 10)')
+    parser.add_argument('--output-ply', default=None,
+                       help='Output PLY path for cluster visualization (optional)')
+    parser.add_argument('--show-noise', action='store_true',
+                       help='Show noise points in gray in PLY output')
     parser.add_argument('--log-level', default='INFO',
                        choices=['DEBUG', 'INFO', 'WARNING', 'ERROR'])
 
@@ -240,14 +356,18 @@ if __name__ == '__main__':
             args.input,
             args.output,
             args.eps,
-            args.min_samples
+            args.min_samples,
+            args.output_ply,
+            args.show_noise
         )
 
         if clusters:
             print(f"\n✅ Clustering complete!")
             print(f"   Total clusters: {len(clusters)}")
             print(f"   Largest cluster: {clusters[0]['n_points']} points")
-            print(f"   Output: {args.output}")
+            print(f"   Output JSON: {args.output}")
+            if args.output_ply:
+                print(f"   Output PLY: {args.output_ply}")
         else:
             print(f"\n⚠️ No clusters found")
 
