@@ -547,16 +547,21 @@ def detect_crack_pixels_in_mask(
     min_component_ratio: float = 0.1
 ) -> np.ndarray:
     """
-    Detect actual crack pixels within YOLO mask region using intensity.
+    Detect actual crack pixels within YOLO mask region.
 
-    Cracks are dark pixels - this finds them within the mask candidate region.
+    Methods:
+    - gradient: High gradient pixels (crack edges) - most robust
+    - percentile: Darkest N% pixels
+    - adaptive: Local adaptive thresholding
+    - otsu: Otsu's automatic thresholding
+
     Uses connectivity filtering to keep only continuous/linear crack patterns,
-    removing scattered isolated dark pixels.
+    removing scattered isolated pixels.
 
     Args:
         grayscale: Grayscale image
         mask: YOLO mask (candidate region)
-        method: 'adaptive', 'otsu', or 'percentile'
+        method: 'gradient', 'adaptive', 'otsu', or 'percentile'
         min_component_ratio: Minimum component size as ratio of largest component
 
     Returns:
@@ -566,7 +571,35 @@ def detect_crack_pixels_in_mask(
     masked_gray = grayscale.copy()
     masked_gray[mask == 0] = 255  # Set non-mask areas to white
 
-    if method == 'otsu':
+    if method == 'gradient' or method.startswith('gradient'):
+        # Gradient-based detection - finds crack edges where intensity changes rapidly
+        # This naturally forms connected lines along crack boundaries
+
+        # Compute gradient magnitude using Sobel
+        grad_x = cv2.Sobel(grayscale, cv2.CV_64F, 1, 0, ksize=3)
+        grad_y = cv2.Sobel(grayscale, cv2.CV_64F, 0, 1, ksize=3)
+        gradient_mag = np.sqrt(grad_x**2 + grad_y**2)
+
+        # Normalize to 0-255
+        gradient_mag = (gradient_mag / gradient_mag.max() * 255).astype(np.uint8)
+
+        # Get gradient values within mask
+        mask_gradients = gradient_mag[mask > 0]
+        if len(mask_gradients) == 0:
+            return np.zeros_like(mask)
+
+        # Extract percentile from method string (e.g., 'gradient_70' means top 30%)
+        percentile_val = 70  # default: top 30% of gradients
+        if '_' in method:
+            try:
+                percentile_val = float(method.split('_')[1])
+            except:
+                pass
+
+        threshold = np.percentile(mask_gradients, percentile_val)
+        crack_binary = (gradient_mag > threshold).astype(np.uint8) * 255
+
+    elif method == 'otsu':
         # Otsu's method - good for bimodal distribution
         mask_pixels = grayscale[mask > 0]
         if len(mask_pixels) == 0:
@@ -1301,8 +1334,9 @@ def run_measurement(
     n_segments: int = 5,
     rgb_dir: str = None,
     use_edge_width: bool = True,
-    detection_method: str = 'percentile',
+    detection_method: str = 'gradient',
     crack_percentile: float = 30.0,
+    gradient_percentile: float = 70.0,
     sample_interval: int = 5,
     min_component_ratio: float = 0.1,
     viz_dir: str = None
@@ -1360,6 +1394,8 @@ def run_measurement(
         method_str = detection_method
         if detection_method == 'percentile':
             method_str = f'percentile_{crack_percentile}'
+        elif detection_method == 'gradient':
+            method_str = f'gradient_{gradient_percentile}'
 
         measurement = measure_cluster(
             cluster,
@@ -1444,11 +1480,13 @@ if __name__ == '__main__':
                        help='RGB images directory (for intensity-based width measurement)')
     parser.add_argument('--no-edge-width', action='store_true',
                        help='Disable intensity-based width measurement (use mask-based)')
-    parser.add_argument('--detection-method', default='percentile',
-                       choices=['percentile', 'adaptive', 'otsu'],
-                       help='Crack detection method: percentile (darkest N%%), adaptive, otsu')
+    parser.add_argument('--detection-method', default='gradient',
+                       choices=['gradient', 'percentile', 'adaptive', 'otsu'],
+                       help='Crack detection method: gradient (edge-based), percentile (darkest N%%), adaptive, otsu')
     parser.add_argument('--crack-percentile', type=float, default=30.0,
-                       help='Percentile threshold for crack pixels (default: 30, lower=stricter)')
+                       help='Percentile threshold for dark pixels (default: 30, lower=stricter)')
+    parser.add_argument('--gradient-percentile', type=float, default=70.0,
+                       help='Percentile threshold for gradient (default: 70, higher=stricter edge detection)')
     parser.add_argument('--min-component-ratio', type=float, default=0.1,
                        help='Min component size as ratio of largest (default: 0.1, higher=stricter)')
     parser.add_argument('--sample-interval', type=int, default=5,
@@ -1476,6 +1514,7 @@ if __name__ == '__main__':
             not args.no_edge_width,
             args.detection_method,
             args.crack_percentile,
+            args.gradient_percentile,
             args.sample_interval,
             args.min_component_ratio,
             args.viz_dir
