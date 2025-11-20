@@ -28,6 +28,8 @@ from collections import defaultdict
 
 from skimage.morphology import skeletonize
 from skimage.draw import polygon as draw_polygon
+import matplotlib.pyplot as plt
+import matplotlib.patches as mpatches
 
 logger = logging.getLogger(__name__)
 
@@ -686,6 +688,151 @@ def calculate_intensity_based_width(
     return np.mean(widths), np.max(widths)
 
 
+def visualize_measurement(
+    rgb_img: np.ndarray,
+    mask: np.ndarray,
+    skeleton: np.ndarray,
+    crack_binary: np.ndarray,
+    scale_map: np.ndarray,
+    cluster_id: int,
+    segment_id: int,
+    length_mm: float,
+    avg_width_mm: float,
+    max_width_mm: float,
+    output_path: Path,
+    sample_interval: int = 5
+):
+    """
+    Create 4-panel visualization of measurement process.
+
+    Panels:
+    (a) RGB + Mask overlay
+    (b) Skeleton (length calculation)
+    (c) Detected crack pixels (intensity-based)
+    (d) Width measurement lines
+    """
+    fig, axes = plt.subplots(2, 2, figsize=(16, 12))
+    fig.suptitle(
+        f'Cluster {cluster_id} - Segment {segment_id}\n'
+        f'Length: {length_mm:.2f}mm | Width: avg={avg_width_mm:.2f}mm, max={max_width_mm:.2f}mm',
+        fontsize=14, fontweight='bold'
+    )
+
+    # (a) RGB + Mask overlay
+    ax = axes[0, 0]
+    rgb_display = rgb_img.copy()
+    if len(rgb_display.shape) == 2:
+        rgb_display = cv2.cvtColor(rgb_display, cv2.COLOR_GRAY2RGB)
+    elif rgb_display.shape[2] == 3:
+        rgb_display = cv2.cvtColor(rgb_display, cv2.COLOR_BGR2RGB)
+
+    # Create mask overlay (semi-transparent yellow)
+    overlay = rgb_display.copy()
+    overlay[mask > 0] = [255, 255, 0]  # Yellow
+    blended = cv2.addWeighted(rgb_display, 0.7, overlay, 0.3, 0)
+
+    ax.imshow(blended)
+    ax.set_title('(a) RGB + YOLO Mask', fontsize=12)
+    ax.axis('off')
+
+    # (b) Skeleton for length
+    ax = axes[0, 1]
+    skeleton_display = np.zeros((*skeleton.shape, 3), dtype=np.uint8)
+    skeleton_display[mask > 0] = [50, 50, 50]  # Dark gray for mask
+    skeleton_display[skeleton > 0] = [0, 255, 0]  # Green for skeleton
+
+    ax.imshow(skeleton_display)
+    ax.set_title('(b) Skeleton (Length Calculation)', fontsize=12)
+    ax.axis('off')
+
+    # Add skeleton pixel count
+    n_skeleton = np.sum(skeleton > 0)
+    ax.text(0.02, 0.98, f'Skeleton pixels: {n_skeleton}',
+            transform=ax.transAxes, fontsize=10,
+            verticalalignment='top', color='white',
+            bbox=dict(boxstyle='round', facecolor='black', alpha=0.7))
+
+    # (c) Detected crack pixels
+    ax = axes[1, 0]
+    crack_display = np.zeros((*crack_binary.shape, 3), dtype=np.uint8)
+    crack_display[mask > 0] = [100, 100, 100]  # Gray for mask region
+    crack_display[crack_binary > 0] = [255, 0, 0]  # Red for crack pixels
+
+    ax.imshow(crack_display)
+    ax.set_title('(c) Detected Crack Pixels (Intensity)', fontsize=12)
+    ax.axis('off')
+
+    # Add crack pixel count
+    n_crack = np.sum(crack_binary > 0)
+    ratio = n_crack / max(np.sum(mask > 0), 1) * 100
+    ax.text(0.02, 0.98, f'Crack pixels: {n_crack} ({ratio:.1f}% of mask)',
+            transform=ax.transAxes, fontsize=10,
+            verticalalignment='top', color='white',
+            bbox=dict(boxstyle='round', facecolor='black', alpha=0.7))
+
+    # (d) Width measurement lines
+    ax = axes[1, 1]
+    width_display = rgb_display.copy()
+
+    # Draw skeleton
+    width_display[skeleton > 0] = [0, 255, 0]
+
+    # Draw width measurement lines
+    rows, cols = np.where(skeleton > 0)
+    if len(rows) > 3:
+        n_pixels = len(rows)
+        sample_indices = range(0, n_pixels, sample_interval)
+
+        for idx in sample_indices:
+            r, c = rows[idx], cols[idx]
+
+            # Estimate direction
+            window = 3
+            nearby_rows = rows[max(0, idx-window):min(n_pixels, idx+window+1)]
+            nearby_cols = cols[max(0, idx-window):min(n_pixels, idx+window+1)]
+
+            if len(nearby_rows) < 2:
+                continue
+
+            dr = nearby_rows[-1] - nearby_rows[0]
+            dc = nearby_cols[-1] - nearby_cols[0]
+            length = np.sqrt(dr**2 + dc**2)
+            if length < 1e-6:
+                continue
+
+            # Normal direction
+            nr, nc = -dc / length, dr / length
+
+            # Measure width
+            width_pixels = measure_width_along_normal(crack_binary, r, c, nr, nc, 50)
+
+            if width_pixels > 0:
+                # Draw line
+                half_width = width_pixels // 2
+                r1 = int(r - half_width * nr)
+                c1 = int(c - half_width * nc)
+                r2 = int(r + half_width * nr)
+                c2 = int(c + half_width * nc)
+
+                cv2.line(width_display, (c1, r1), (c2, r2), (255, 0, 255), 1)  # Magenta
+
+    ax.imshow(width_display)
+    ax.set_title('(d) Width Measurement Lines', fontsize=12)
+    ax.axis('off')
+
+    # Add legend
+    green_patch = mpatches.Patch(color='green', label='Skeleton')
+    magenta_patch = mpatches.Patch(color='magenta', label='Width lines')
+    ax.legend(handles=[green_patch, magenta_patch], loc='lower right', fontsize=9)
+
+    plt.tight_layout()
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    plt.savefig(output_path, dpi=150, bbox_inches='tight')
+    plt.close()
+
+    logger.debug(f"Saved visualization: {output_path}")
+
+
 def calculate_edge_based_width(
     skeleton: np.ndarray,
     grayscale: np.ndarray,
@@ -841,7 +988,10 @@ def measure_segment_2d(
     rgb_dir: Path = None,
     use_edge_width: bool = True,
     detection_method: str = 'percentile_30',
-    sample_interval: int = 5
+    sample_interval: int = 5,
+    viz_dir: Path = None,
+    cluster_id: int = 0,
+    segment_id: int = 0
 ) -> Dict:
     """
     Measure a segment using 2D skeleton method with per-pixel scale map.
@@ -930,6 +1080,18 @@ def measure_segment_2d(
                 )
                 width_method = 'intensity'
 
+                # Generate visualization if requested
+                if viz_dir:
+                    crack_binary = detect_crack_pixels_in_mask(
+                        grayscale, binary_mask, detection_method
+                    )
+                    viz_path = viz_dir / f"cluster_{cluster_id}_seg_{segment_id}.png"
+                    visualize_measurement(
+                        rgb_img, binary_mask, skeleton, crack_binary, scale_map,
+                        cluster_id, segment_id, length_mm, avg_width_mm, max_width_mm,
+                        viz_path, sample_interval
+                    )
+
     # Fallback to mask-based width if intensity detection failed or not used
     if avg_width_mm == 0.0 and max_width_mm == 0.0:
         avg_width_mm, max_width_mm = calculate_skeleton_width(
@@ -959,7 +1121,8 @@ def measure_cluster(
     rgb_dir: Path = None,
     use_edge_width: bool = True,
     detection_method: str = 'percentile_30',
-    sample_interval: int = 5
+    sample_interval: int = 5,
+    viz_dir: Path = None
 ) -> Dict:
     """
     Measure a single cluster.
@@ -1053,7 +1216,8 @@ def measure_cluster(
         measurement = measure_segment_2d(
             masks_dir, image_id, mask_id, scale_map, segment_uvs, image_shape,
             margin=50, rgb_dir=rgb_dir, use_edge_width=use_edge_width,
-            detection_method=detection_method, sample_interval=sample_interval
+            detection_method=detection_method, sample_interval=sample_interval,
+            viz_dir=viz_dir, cluster_id=cluster_id, segment_id=segment['segment_id']
         )
 
         measurement['segment_id'] = segment['segment_id']
@@ -1100,7 +1264,8 @@ def run_measurement(
     use_edge_width: bool = True,
     detection_method: str = 'percentile',
     crack_percentile: float = 30.0,
-    sample_interval: int = 5
+    sample_interval: int = 5,
+    viz_dir: str = None
 ):
     """
     Run measurement on all clusters using per-pixel scale maps.
@@ -1126,6 +1291,7 @@ def run_measurement(
     masks_path = Path(masks_dir)
     scale_maps_path = Path(scale_maps_dir)
     rgb_path = Path(rgb_dir) if rgb_dir else None
+    viz_path = Path(viz_dir) if viz_dir else None
     image_shape = (image_height, image_width)
 
     clusters = clusters_data.get('clusters', [])
@@ -1139,6 +1305,9 @@ def run_measurement(
         logger.info(f"  Sample interval: {sample_interval}")
     else:
         logger.info("Using mask-based width measurement")
+
+    if viz_path:
+        logger.info(f"Visualization output: {viz_dir}")
 
     # Generate colors for clusters (same as visualization)
     cluster_colors = generate_cluster_colors(len(clusters))
@@ -1162,7 +1331,8 @@ def run_measurement(
             rgb_path,
             use_edge_width,
             method_str,
-            sample_interval
+            sample_interval,
+            viz_path
         )
 
         # Add color information
@@ -1240,6 +1410,8 @@ if __name__ == '__main__':
                        help='Percentile threshold for crack pixels (default: 30, lower=stricter)')
     parser.add_argument('--sample-interval', type=int, default=5,
                        help='Sample every N skeleton pixels for width (default: 5)')
+    parser.add_argument('--viz-dir', default=None,
+                       help='Output directory for measurement visualization images')
     parser.add_argument('--log-level', default='INFO',
                        choices=['DEBUG', 'INFO', 'WARNING', 'ERROR'])
 
@@ -1261,7 +1433,8 @@ if __name__ == '__main__':
             not args.no_edge_width,
             args.detection_method,
             args.crack_percentile,
-            args.sample_interval
+            args.sample_interval,
+            args.viz_dir
         )
 
         if measurements:
