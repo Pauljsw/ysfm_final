@@ -111,19 +111,20 @@ def upsample_knn_interpolation(
                 # Linear interpolation of coordinates
                 interp_coord = coord_i * (1 - alpha) + coord_j * alpha
 
-                # Interpolate color
-                color_i = np.array(point_i['color'])
-                color_j = np.array(point_j['color'])
-                interp_color = (color_i * (1 - alpha) + color_j * alpha).astype(int).tolist()
-
                 # Create synthetic point
                 synthetic_point = {
                     'point_id': synthetic_id,
                     'xyz': interp_coord.tolist(),
-                    'color': interp_color,
                     'is_synthetic': True,
                     'parent_ids': [point_i['point_id'], point_j['point_id']]
                 }
+
+                # Interpolate color if available
+                if 'color' in point_i and 'color' in point_j:
+                    color_i = np.array(point_i['color'])
+                    color_j = np.array(point_j['color'])
+                    interp_color = (color_i * (1 - alpha) + color_j * alpha).astype(int).tolist()
+                    synthetic_point['color'] = interp_color
 
                 result_points.append(synthetic_point)
                 synthetic_id += 1
@@ -220,17 +221,19 @@ def upsample_with_density_control(
 
                 interp_coord = coord_i * (1 - alpha) + coord_j * alpha
 
-                color_i = np.array(point_i['color'])
-                color_j = np.array(point_j['color'])
-                interp_color = (color_i * (1 - alpha) + color_j * alpha).astype(int).tolist()
-
                 synthetic_point = {
                     'point_id': synthetic_id,
                     'xyz': interp_coord.tolist(),
-                    'color': interp_color,
                     'is_synthetic': True,
                     'parent_ids': [point_i['point_id'], point_j['point_id']]
                 }
+
+                # Interpolate color if available
+                if 'color' in point_i and 'color' in point_j:
+                    color_i = np.array(point_i['color'])
+                    color_j = np.array(point_j['color'])
+                    interp_color = (color_i * (1 - alpha) + color_j * alpha).astype(int).tolist()
+                    synthetic_point['color'] = interp_color
 
                 result_points.append(synthetic_point)
                 synthetic_id += 1
