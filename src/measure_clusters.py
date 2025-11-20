@@ -1420,7 +1420,12 @@ def measure_cluster(
         best_mask = find_best_mask_for_segment(segment)
 
         if not best_mask:
-            logger.debug(f"Segment {segment['segment_id']}: No mask found")
+            # Count points with source_masks for debugging
+            n_points = len(segment['points'])
+            n_with_sources = sum(1 for p in segment['points']
+                                 if p.get('source_masks') and not p.get('is_synthetic', False))
+            logger.warning(f"Segment {segment['segment_id']}: No mask found "
+                          f"(points={n_points}, with_sources={n_with_sources})")
             continue
 
         image_id, mask_id = best_mask
