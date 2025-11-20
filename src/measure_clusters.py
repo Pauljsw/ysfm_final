@@ -543,17 +543,21 @@ def measure_width_along_normal(
 def detect_crack_pixels_in_mask(
     grayscale: np.ndarray,
     mask: np.ndarray,
-    method: str = 'adaptive'
+    method: str = 'adaptive',
+    min_component_ratio: float = 0.1
 ) -> np.ndarray:
     """
     Detect actual crack pixels within YOLO mask region using intensity.
 
     Cracks are dark pixels - this finds them within the mask candidate region.
+    Uses connectivity filtering to keep only continuous/linear crack patterns,
+    removing scattered isolated dark pixels.
 
     Args:
         grayscale: Grayscale image
         mask: YOLO mask (candidate region)
         method: 'adaptive', 'otsu', or 'percentile'
+        min_component_ratio: Minimum component size as ratio of largest component
 
     Returns:
         Binary image where 1 = actual crack pixel, 0 = background
@@ -601,11 +605,40 @@ def detect_crack_pixels_in_mask(
     # Apply original mask to limit to ROI
     crack_binary = cv2.bitwise_and(crack_binary, crack_binary, mask=mask.astype(np.uint8))
 
-    # Morphological cleanup - remove noise
-    kernel = np.ones((2, 2), np.uint8)
+    # === Connectivity filtering to keep only continuous crack patterns ===
+
+    # Step 1: Morphological opening with larger kernel to remove small noise
+    kernel = np.ones((3, 3), np.uint8)
     crack_binary = cv2.morphologyEx(crack_binary, cv2.MORPH_OPEN, kernel)
 
-    return crack_binary
+    # Step 2: Connected component analysis - keep only significant components
+    num_labels, labels, stats, centroids = cv2.connectedComponentsWithStats(
+        crack_binary, connectivity=8
+    )
+
+    if num_labels <= 1:  # Only background
+        return crack_binary
+
+    # Find the largest component (excluding background at label 0)
+    component_sizes = stats[1:, cv2.CC_STAT_AREA]
+    if len(component_sizes) == 0:
+        return crack_binary
+
+    max_size = np.max(component_sizes)
+    min_size_threshold = max_size * min_component_ratio
+
+    # Create filtered binary image with only significant components
+    filtered_binary = np.zeros_like(crack_binary)
+    for label_id in range(1, num_labels):
+        component_size = stats[label_id, cv2.CC_STAT_AREA]
+        if component_size >= min_size_threshold:
+            filtered_binary[labels == label_id] = 255
+
+    # Step 3: Optional morphological closing to connect nearby fragments
+    kernel_close = np.ones((2, 2), np.uint8)
+    filtered_binary = cv2.morphologyEx(filtered_binary, cv2.MORPH_CLOSE, kernel_close)
+
+    return filtered_binary
 
 
 def calculate_intensity_based_width(
@@ -614,7 +647,8 @@ def calculate_intensity_based_width(
     mask: np.ndarray,
     scale_map: np.ndarray,
     sample_interval: int = 5,
-    detection_method: str = 'percentile'
+    detection_method: str = 'percentile',
+    min_component_ratio: float = 0.1
 ) -> Tuple[float, float]:
     """
     Calculate crack width by detecting actual dark crack pixels within mask.
@@ -628,12 +662,13 @@ def calculate_intensity_based_width(
         scale_map: Per-pixel mm/px scale map
         sample_interval: Sample every N skeleton pixels
         detection_method: Method for crack pixel detection
+        min_component_ratio: Minimum component size as ratio of largest
 
     Returns:
         (average_width_mm, max_width_mm)
     """
     # Detect actual crack pixels within mask
-    crack_binary = detect_crack_pixels_in_mask(grayscale, mask, detection_method)
+    crack_binary = detect_crack_pixels_in_mask(grayscale, mask, detection_method, min_component_ratio)
 
     # Find skeleton pixels
     rows, cols = np.where(skeleton > 0)
@@ -989,6 +1024,7 @@ def measure_segment_2d(
     use_edge_width: bool = True,
     detection_method: str = 'percentile_30',
     sample_interval: int = 5,
+    min_component_ratio: float = 0.1,
     viz_dir: Path = None,
     cluster_id: int = 0,
     segment_id: int = 0
@@ -1076,14 +1112,15 @@ def measure_segment_2d(
                 avg_width_mm, max_width_mm = calculate_intensity_based_width(
                     skeleton, grayscale, binary_mask, scale_map,
                     sample_interval=sample_interval,
-                    detection_method=detection_method
+                    detection_method=detection_method,
+                    min_component_ratio=min_component_ratio
                 )
                 width_method = 'intensity'
 
                 # Generate visualization if requested
                 if viz_dir:
                     crack_binary = detect_crack_pixels_in_mask(
-                        grayscale, binary_mask, detection_method
+                        grayscale, binary_mask, detection_method, min_component_ratio
                     )
                     viz_path = viz_dir / f"cluster_{cluster_id}_seg_{segment_id}.png"
                     visualize_measurement(
@@ -1122,6 +1159,7 @@ def measure_cluster(
     use_edge_width: bool = True,
     detection_method: str = 'percentile_30',
     sample_interval: int = 5,
+    min_component_ratio: float = 0.1,
     viz_dir: Path = None
 ) -> Dict:
     """
@@ -1217,6 +1255,7 @@ def measure_cluster(
             masks_dir, image_id, mask_id, scale_map, segment_uvs, image_shape,
             margin=50, rgb_dir=rgb_dir, use_edge_width=use_edge_width,
             detection_method=detection_method, sample_interval=sample_interval,
+            min_component_ratio=min_component_ratio,
             viz_dir=viz_dir, cluster_id=cluster_id, segment_id=segment['segment_id']
         )
 
@@ -1265,6 +1304,7 @@ def run_measurement(
     detection_method: str = 'percentile',
     crack_percentile: float = 30.0,
     sample_interval: int = 5,
+    min_component_ratio: float = 0.1,
     viz_dir: str = None
 ):
     """
@@ -1332,6 +1372,7 @@ def run_measurement(
             use_edge_width,
             method_str,
             sample_interval,
+            min_component_ratio,
             viz_path
         )
 
@@ -1408,6 +1449,8 @@ if __name__ == '__main__':
                        help='Crack detection method: percentile (darkest N%%), adaptive, otsu')
     parser.add_argument('--crack-percentile', type=float, default=30.0,
                        help='Percentile threshold for crack pixels (default: 30, lower=stricter)')
+    parser.add_argument('--min-component-ratio', type=float, default=0.1,
+                       help='Min component size as ratio of largest (default: 0.1, higher=stricter)')
     parser.add_argument('--sample-interval', type=int, default=5,
                        help='Sample every N skeleton pixels for width (default: 5)')
     parser.add_argument('--viz-dir', default=None,
@@ -1434,6 +1477,7 @@ if __name__ == '__main__':
             args.detection_method,
             args.crack_percentile,
             args.sample_interval,
+            args.min_component_ratio,
             args.viz_dir
         )
 
