@@ -276,7 +276,16 @@ python -m src.measure_clusters \
     --scale-maps-dir outputs/d2c_pixel_scale \
     --rgb-dir data/rgb \
     --output outputs/cluster_measurements.json \
-    --n-segments 5
+    --image-width 3840 \
+    --image-height 2160 \
+    --n-segments 10 \
+    --detection-method gradient \
+    --gradient-percentile 85 \
+    --min-component-ratio 0.3 \
+    --max-width-filter 1.0 \
+    --sample-interval 10 \
+    --log-level INFO \
+    --viz-dir outputs/visualizations_measurements
 ```
 
 ### 왜 필요한가?
@@ -288,13 +297,18 @@ python -m src.measure_clusters \
 1. **3D 세그먼트 분할**: 클러스터를 principal axis 따라 N개 구간으로 분할
 2. **세그먼트별 최적 마스크 선택**: 각 세그먼트를 가장 잘 커버하는 마스크 선택
 3. **UV 기반 마스크 crop**: 세그먼트의 2D 영역만 측정
-4. **Skeleton 기반 길이**: 방향별 픽셀 연결 × scale
-5. **Edge 기반 폭**: Canny edge 사이 거리 측정 (또는 mask 기반 fallback)
+4. **Skeleton 기반 길이**: 스켈레톤화 → 방향별 픽셀 연결 × scale
+5. **Gradient 기반 폭**: Sobel gradient로 균열 edge 검출 → 수직 방향 거리 측정
 
 ### 주요 파라미터
 - `--n-segments`: 클러스터당 세그먼트 수 (기본 5)
-- `--rgb-dir`: RGB 이미지 경로 (edge 기반 폭 측정용)
-- `--no-edge-width`: edge 측정 비활성화 (mask 기반 사용)
+- `--detection-method`: 균열 검출 방식 (gradient/percentile/adaptive/otsu)
+- `--gradient-percentile`: gradient 상위 N% 사용 (기본 70, 높을수록 엄격)
+- `--min-component-ratio`: 최소 영역 비율 (기본 0.1, 높을수록 엄격)
+- `--max-width-filter`: 이 값(mm) 초과 폭 샘플 제외 (기본 None)
+- `--sample-interval`: N 픽셀마다 폭 샘플링 (기본 5)
+- `--viz-dir`: 측정 시각화 출력 경로
+- `--no-edge-width`: gradient 측정 비활성화 (mask 기반 사용)
 
 ---
 
@@ -350,7 +364,12 @@ python -m src.measure_clusters \
     --masks-dir data/yolo_masks \
     --scale-maps-dir outputs/d2c_pixel_scale \
     --rgb-dir data/rgb \
-    --output outputs/cluster_measurements.json
+    --output outputs/cluster_measurements.json \
+    --image-width 3840 --image-height 2160 \
+    --n-segments 10 --detection-method gradient \
+    --gradient-percentile 85 --min-component-ratio 0.3 \
+    --max-width-filter 1.0 --sample-interval 10 \
+    --viz-dir outputs/visualizations_measurements
 ```
 
 ---
