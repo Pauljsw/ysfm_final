@@ -611,6 +611,24 @@ def run_dbscan_clustering(
 
     logger.info(f"  Loaded {len(crack_points)} crack points")
 
+    # Check for duplicate point_ids in input
+    input_point_ids = [p['point_id'] for p in crack_points]
+    if len(input_point_ids) != len(set(input_point_ids)):
+        from collections import Counter
+        counter = Counter(input_point_ids)
+        duplicates = {pid: count for pid, count in counter.items() if count > 1}
+        logger.warning(f"⚠️ Input has {len(duplicates)} duplicate point_ids! Examples: {list(duplicates.keys())[:5]}")
+
+        # Remove duplicates, keep first occurrence
+        seen = set()
+        unique_crack_points = []
+        for p in crack_points:
+            if p['point_id'] not in seen:
+                seen.add(p['point_id'])
+                unique_crack_points.append(p)
+        logger.info(f"  Removed {len(crack_points) - len(unique_crack_points)} duplicate points")
+        crack_points = unique_crack_points
+
     if len(crack_points) == 0:
         logger.warning("No crack points to cluster!")
         return
