@@ -74,7 +74,14 @@ class DepthToColorAligner:
 
         # Parse extrinsic parameters (Depth to Color transformation)
         self.R = np.array(self.extrinsic['R'], dtype=np.float64)
-        self.t = np.array(self.extrinsic['t'], dtype=np.float64).reshape(3, 1)
+        t_raw = np.array(self.extrinsic['t'], dtype=np.float64).reshape(3, 1)
+
+        # Check if t is in mm (magnitude > 1) or meters (magnitude < 1)
+        if np.max(np.abs(t_raw)) > 1.0:
+            self.t = t_raw / 1000.0  # mm -> meters
+            logger.debug(f"Converted t from mm to meters: {self.t.flatten()}")
+        else:
+            self.t = t_raw  # already in meters
 
         logger.info("Initialized D2C Aligner WITH Distortion Correction:")
         logger.info(f"  RGB: {self.rgb_width}×{self.rgb_height}")

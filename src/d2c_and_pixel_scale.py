@@ -60,7 +60,16 @@ def load_extrinsic(json_path: str) -> Tuple[np.ndarray, np.ndarray]:
         data = json.load(f)
 
     R = np.array(data["R"], dtype=np.float32).reshape(3, 3)
-    t = np.array(data["t"], dtype=np.float32).reshape(3, 1)  # meters
+    t_raw = np.array(data["t"], dtype=np.float32).reshape(3, 1)
+
+    # Check if t is in mm (magnitude > 1) or meters (magnitude < 1)
+    # If t values are large (> 1), assume mm and convert to meters
+    if np.max(np.abs(t_raw)) > 1.0:
+        t = t_raw / 1000.0  # mm -> meters
+        logger.debug(f"Converted t from mm to meters: {t.flatten()}")
+    else:
+        t = t_raw  # already in meters
+        logger.debug(f"t already in meters: {t.flatten()}")
 
     return R, t
 

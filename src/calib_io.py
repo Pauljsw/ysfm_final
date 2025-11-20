@@ -135,10 +135,16 @@ def load_transform(json_path: str) -> Tuple[np.ndarray, np.ndarray]:
     
     with open(path, 'r') as f:
         data = json.load(f)
-    
+
     R = np.array(data['R'], dtype=np.float64)
-    t = np.array(data['t'], dtype=np.float64).reshape(3, 1)
-    
+    t_raw = np.array(data['t'], dtype=np.float64).reshape(3, 1)
+
+    # Check if t is in mm (magnitude > 1) or meters (magnitude < 1)
+    if np.max(np.abs(t_raw)) > 1.0:
+        t = t_raw / 1000.0  # mm -> meters
+    else:
+        t = t_raw  # already in meters
+
     return R, t
 
 
