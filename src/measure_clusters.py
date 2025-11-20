@@ -808,7 +808,8 @@ def calculate_intensity_based_width(
     scale_map: np.ndarray,
     sample_interval: int = 5,
     detection_method: str = 'percentile',
-    min_component_ratio: float = 0.1
+    min_component_ratio: float = 0.1,
+    max_width_filter: float = None
 ) -> Tuple[float, float]:
     """
     Calculate crack width by detecting actual dark crack pixels within mask.
@@ -823,6 +824,7 @@ def calculate_intensity_based_width(
         sample_interval: Sample every N skeleton pixels
         detection_method: Method for crack pixel detection
         min_component_ratio: Minimum component size as ratio of largest
+        max_width_filter: Exclude width samples exceeding this value (mm)
 
     Returns:
         (average_width_mm, max_width_mm)
@@ -880,7 +882,13 @@ def calculate_intensity_based_width(
     if not widths:
         return 0.0, 0.0
 
-    return np.mean(widths), np.max(widths)
+    # Filter out outliers exceeding max_width_filter
+    if max_width_filter is not None and max_width_filter > 0:
+        widths = [w for w in widths if w <= max_width_filter]
+        if not widths:
+            return 0.0, 0.0
+
+    return float(np.mean(widths)), float(np.max(widths))
 
 
 def visualize_measurement(
@@ -1185,6 +1193,7 @@ def measure_segment_2d(
     detection_method: str = 'percentile_30',
     sample_interval: int = 5,
     min_component_ratio: float = 0.1,
+    max_width_filter: float = None,
     viz_dir: Path = None,
     cluster_id: int = 0,
     segment_id: int = 0
@@ -1289,7 +1298,8 @@ def measure_segment_2d(
                         skeleton, grayscale, binary_mask, scale_map,
                         sample_interval=sample_interval,
                         detection_method=detection_method,
-                        min_component_ratio=min_component_ratio
+                        min_component_ratio=min_component_ratio,
+                        max_width_filter=max_width_filter
                     )
                     width_method = 'intensity'
 
@@ -1350,6 +1360,7 @@ def measure_cluster(
     detection_method: str = 'percentile_30',
     sample_interval: int = 5,
     min_component_ratio: float = 0.1,
+    max_width_filter: float = None,
     viz_dir: Path = None
 ) -> Dict:
     """
@@ -1445,7 +1456,7 @@ def measure_cluster(
             masks_dir, image_id, mask_id, scale_map, segment_uvs, image_shape,
             margin=50, rgb_dir=rgb_dir, use_edge_width=use_edge_width,
             detection_method=detection_method, sample_interval=sample_interval,
-            min_component_ratio=min_component_ratio,
+            min_component_ratio=min_component_ratio, max_width_filter=max_width_filter,
             viz_dir=viz_dir, cluster_id=cluster_id, segment_id=segment['segment_id']
         )
 
@@ -1497,6 +1508,7 @@ def run_measurement(
     intensity_threshold: float = 0.7,
     sample_interval: int = 5,
     min_component_ratio: float = 0.1,
+    max_width_filter: float = None,
     viz_dir: str = None
 ):
     """
@@ -1569,6 +1581,7 @@ def run_measurement(
             method_str,
             sample_interval,
             min_component_ratio,
+            max_width_filter,
             viz_path
         )
 
@@ -1651,6 +1664,8 @@ if __name__ == '__main__':
                        help='For direct mode: dark pixel threshold as ratio of background (default: 0.7)')
     parser.add_argument('--min-component-ratio', type=float, default=0.1,
                        help='Min component size as ratio of largest (default: 0.1, higher=stricter)')
+    parser.add_argument('--max-width-filter', type=float, default=None,
+                       help='Exclude width samples exceeding this value in mm (default: None)')
     parser.add_argument('--sample-interval', type=int, default=5,
                        help='Sample every N skeleton pixels for width (default: 5)')
     parser.add_argument('--viz-dir', default=None,
@@ -1680,6 +1695,7 @@ if __name__ == '__main__':
             args.intensity_threshold,
             args.sample_interval,
             args.min_component_ratio,
+            args.max_width_filter,
             args.viz_dir
         )
 
