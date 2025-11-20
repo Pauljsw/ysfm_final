@@ -589,14 +589,25 @@ def run_measurement(
         p['point_id']: p for p in crack_points_data['points']
     }
 
-    # pixel_mm_ratios can be nested or flat
+    # pixel_mm_ratios: handle different formats from pixel_calibration.py
     if 'images' in pixel_mm_data:
+        # Format: {"images": [{"image_id": ..., "pixel_mm_ratio": ...}]}
         pixel_mm_ratios = {
             img['image_id'].replace('.png', ''): img['pixel_mm_ratio']
             for img in pixel_mm_data['images']
         }
     else:
-        pixel_mm_ratios = pixel_mm_data
+        # Format from pixel_calibration.py: {"image_id": {"mean_scale_mm": ...}}
+        pixel_mm_ratios = {}
+        for key, value in pixel_mm_data.items():
+            if isinstance(value, dict) and 'mean_scale_mm' in value:
+                # pixel_calibration.py format
+                clean_key = key.replace('.png', '')
+                pixel_mm_ratios[clean_key] = value['mean_scale_mm']
+            elif isinstance(value, (int, float)):
+                # Simple format: {"image_id": ratio}
+                clean_key = key.replace('.png', '')
+                pixel_mm_ratios[clean_key] = value
 
     masks_path = Path(masks_dir)
     image_shape = (image_height, image_width)
