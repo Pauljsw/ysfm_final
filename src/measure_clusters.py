@@ -234,14 +234,14 @@ def polygon_to_binary_mask(
 
 def calculate_skeleton_length(
     skeleton: np.ndarray,
-    D: float
+    scale_map: np.ndarray
 ) -> float:
     """
-    Calculate crack length from skeleton using direction-based method.
+    Calculate crack length from skeleton using direction-based method with per-pixel scale.
 
     Args:
         skeleton: Binary skeleton image (1px thick)
-        D: pixel_mm_ratio (mm per pixel)
+        scale_map: Per-pixel mm/px scale map (same size as skeleton)
 
     Returns:
         Length in mm
@@ -255,15 +255,16 @@ def calculate_skeleton_length(
     # Create set for fast lookup
     skeleton_pixels = set(zip(rows, cols))
 
-    # Count connections by direction
-    # Directions: (dr, dc) -> type
-    # Horizontal/Vertical: distance = D
-    # Diagonal: distance = sqrt(2) * D
-
     total_length = 0.0
     visited_edges = set()
 
     for r, c in skeleton_pixels:
+        # Get scale at this pixel
+        D = scale_map[r, c] if scale_map[r, c] > 0 else 0.0
+
+        if D == 0:
+            continue
+
         # Check 8-connected neighbors
         neighbors = [
             (r-1, c),   # up (V)
@@ -284,11 +285,15 @@ def calculate_skeleton_length(
                 if edge not in visited_edges:
                     visited_edges.add(edge)
 
+                    # Use average scale of the two pixels
+                    D_neighbor = scale_map[nr, nc] if scale_map[nr, nc] > 0 else D
+                    D_avg = (D + D_neighbor) / 2.0
+
                     # Determine distance based on direction
                     if i < 4:  # H or V
-                        total_length += D
+                        total_length += D_avg
                     else:  # Diagonal
-                        total_length += D * np.sqrt(2)
+                        total_length += D_avg * np.sqrt(2)
 
     return total_length
 
@@ -296,16 +301,16 @@ def calculate_skeleton_length(
 def calculate_skeleton_width(
     skeleton: np.ndarray,
     binary_mask: np.ndarray,
-    D: float,
+    scale_map: np.ndarray,
     sample_interval: int = 5
 ) -> Tuple[float, float]:
     """
-    Calculate crack width by measuring perpendicular to skeleton.
+    Calculate crack width by measuring perpendicular to skeleton with per-pixel scale.
 
     Args:
         skeleton: Binary skeleton image
         binary_mask: Original binary mask
-        D: pixel_mm_ratio
+        scale_map: Per-pixel mm/px scale map
         sample_interval: Sample every N skeleton pixels
 
     Returns:
@@ -326,8 +331,12 @@ def calculate_skeleton_width(
     for idx in sample_indices:
         r, c = rows[idx], cols[idx]
 
+        # Get scale at this pixel
+        D = scale_map[r, c] if scale_map[r, c] > 0 else 0.0
+        if D == 0:
+            continue
+
         # Estimate local direction from nearby skeleton pixels
-        # Use a small window
         window = 3
         nearby_rows = rows[max(0, idx-window):min(n_pixels, idx+window+1)]
         nearby_cols = cols[max(0, idx-window):min(n_pixels, idx+window+1)]
@@ -413,13 +422,13 @@ def calculate_edge_based_width(
     skeleton: np.ndarray,
     grayscale: np.ndarray,
     roi_mask: np.ndarray,
-    D: float,
+    scale_map: np.ndarray,
     sample_interval: int = 5,
     canny_low: int = 50,
     canny_high: int = 150
 ) -> Tuple[float, float]:
     """
-    Calculate crack width using edge detection on grayscale image.
+    Calculate crack width using edge detection on grayscale image with per-pixel scale.
 
     This measures the actual crack boundaries based on intensity changes,
     not the YOLO mask boundaries.
@@ -428,7 +437,7 @@ def calculate_edge_based_width(
         skeleton: Binary skeleton image
         grayscale: Grayscale image (ROI region)
         roi_mask: ROI mask to limit edge detection area
-        D: pixel_mm_ratio
+        scale_map: Per-pixel mm/px scale map
         sample_interval: Sample every N skeleton pixels
         canny_low: Canny edge detection low threshold
         canny_high: Canny edge detection high threshold
@@ -461,6 +470,11 @@ def calculate_edge_based_width(
 
     for idx in sample_indices:
         r, c = rows[idx], cols[idx]
+
+        # Get scale at this pixel
+        D = scale_map[r, c] if scale_map[r, c] > 0 else 0.0
+        if D == 0:
+            continue
 
         # Estimate local direction from nearby skeleton pixels
         window = 3
@@ -552,7 +566,7 @@ def measure_segment_2d(
     masks_dir: Path,
     image_id: str,
     mask_id: int,
-    pixel_mm_ratio: float,
+    scale_map: np.ndarray,
     segment_uvs: List[List[float]] = None,
     image_shape: Tuple[int, int] = (2160, 3840),
     margin: int = 50,
@@ -560,13 +574,13 @@ def measure_segment_2d(
     use_edge_width: bool = True
 ) -> Dict:
     """
-    Measure a segment using 2D skeleton method.
+    Measure a segment using 2D skeleton method with per-pixel scale map.
 
     Args:
         masks_dir: Path to YOLO masks
         image_id: Image identifier
         mask_id: Mask index
-        pixel_mm_ratio: mm per pixel
+        scale_map: Per-pixel mm/px scale map (H, W)
         segment_uvs: List of [u, v] coordinates for this segment (for cropping)
         image_shape: (height, width)
         margin: Margin around bounding box for cropping
@@ -613,9 +627,8 @@ def measure_segment_2d(
     # Skeletonize
     skeleton = skeletonize(binary_mask > 0)
 
-    # Calculate length
-    D = pixel_mm_ratio
-    length_mm = calculate_skeleton_length(skeleton, D)
+    # Calculate length using per-pixel scale
+    length_mm = calculate_skeleton_length(skeleton, scale_map)
 
     # Calculate width
     avg_width_mm, max_width_mm = 0.0, 0.0
@@ -639,14 +652,14 @@ def measure_segment_2d(
 
                 # Use binary_mask as ROI
                 avg_width_mm, max_width_mm = calculate_edge_based_width(
-                    skeleton, grayscale, binary_mask, D
+                    skeleton, grayscale, binary_mask, scale_map
                 )
                 width_method = 'edge'
 
     # Fallback to mask-based width if edge detection failed or not used
     if avg_width_mm == 0.0 and max_width_mm == 0.0:
         avg_width_mm, max_width_mm = calculate_skeleton_width(
-            skeleton, binary_mask, D
+            skeleton, binary_mask, scale_map
         )
         width_method = 'mask'
 
@@ -666,7 +679,7 @@ def measure_cluster(
     cluster: Dict,
     crack_points_lookup: Dict[int, Dict],
     masks_dir: Path,
-    pixel_mm_ratios: Dict[str, float],
+    scale_maps_dir: Path,
     image_shape: Tuple[int, int],
     n_segments: int = 5,
     rgb_dir: Path = None,
@@ -679,7 +692,7 @@ def measure_cluster(
         cluster: Cluster dict from crack_clusters.json
         crack_points_lookup: point_id -> point dict
         masks_dir: Path to YOLO masks
-        pixel_mm_ratios: image_id -> pixel_mm_ratio
+        scale_maps_dir: Path to scale map .npy files
         image_shape: (height, width)
         n_segments: Number of segments
         rgb_dir: Path to RGB images (for edge-based width)
@@ -724,9 +737,7 @@ def measure_cluster(
 
         image_id, mask_id = best_mask
 
-        # Get pixel_mm_ratio for this image
-        # Try different key formats (handle camera_RGB_ prefix)
-        D = None
+        # Load scale map for this image
         # Extract timestamp part from image_id (e.g., camera_RGB_1761702052_213355008 -> 1761702052_213355008)
         timestamp_key = image_id
         for prefix in ['camera_RGB_', 'camera_DPT_']:
@@ -734,13 +745,23 @@ def measure_cluster(
                 timestamp_key = image_id[len(prefix):]
                 break
 
-        for key in [image_id, timestamp_key, f"{image_id}.png", image_id.replace('.png', '')]:
-            if key in pixel_mm_ratios:
-                D = pixel_mm_ratios[key]
+        # Try to find scale map file
+        # d2c_and_pixel_scale.py saves as: scale_map_iso_camera_DPT_{timestamp}.npy
+        scale_map = None
+        scale_map_patterns = [
+            f"scale_map_iso_camera_DPT_{timestamp_key}.npy",
+            f"scale_map_iso_{image_id}.npy",
+            f"scale_map_iso_{timestamp_key}.npy",
+        ]
+
+        for pattern in scale_map_patterns:
+            scale_map_path = scale_maps_dir / pattern
+            if scale_map_path.exists():
+                scale_map = np.load(scale_map_path)
                 break
 
-        if D is None:
-            logger.warning(f"No pixel_mm_ratio for {image_id}")
+        if scale_map is None:
+            logger.warning(f"No scale map for {image_id}")
             continue
 
         # Extract UV coordinates for this segment from points that belong to best_mask
@@ -754,7 +775,7 @@ def measure_cluster(
 
         # Measure in 2D with segment cropping and edge-based width
         measurement = measure_segment_2d(
-            masks_dir, image_id, mask_id, D, segment_uvs, image_shape,
+            masks_dir, image_id, mask_id, scale_map, segment_uvs, image_shape,
             margin=50, rgb_dir=rgb_dir, use_edge_width=use_edge_width
         )
 
@@ -793,7 +814,7 @@ def run_measurement(
     clusters_json: str,
     crack_points_json: str,
     masks_dir: str,
-    pixel_mm_json: str,
+    scale_maps_dir: str,
     output_json: str,
     image_width: int = 3840,
     image_height: int = 2160,
@@ -802,7 +823,7 @@ def run_measurement(
     use_edge_width: bool = True
 ):
     """
-    Run measurement on all clusters.
+    Run measurement on all clusters using per-pixel scale maps.
     """
     logger.info("=" * 80)
     logger.info("Cluster Measurement")
@@ -817,41 +838,19 @@ def run_measurement(
     with open(crack_points_json) as f:
         crack_points_data = json.load(f)
 
-    logger.info(f"Loading pixel_mm_ratio: {pixel_mm_json}")
-    with open(pixel_mm_json) as f:
-        pixel_mm_data = json.load(f)
-
     # Build lookup tables
     crack_points_lookup = {
         p['point_id']: p for p in crack_points_data['points']
     }
 
-    # pixel_mm_ratios: handle different formats from pixel_calibration.py
-    if 'images' in pixel_mm_data:
-        # Format: {"images": [{"image_id": ..., "pixel_mm_ratio": ...}]}
-        pixel_mm_ratios = {
-            img['image_id'].replace('.png', ''): img['pixel_mm_ratio']
-            for img in pixel_mm_data['images']
-        }
-    else:
-        # Format from pixel_calibration.py: {"image_id": {"mean_scale_mm": ...}}
-        pixel_mm_ratios = {}
-        for key, value in pixel_mm_data.items():
-            if isinstance(value, dict) and 'mean_scale_mm' in value:
-                # pixel_calibration.py format
-                clean_key = key.replace('.png', '')
-                pixel_mm_ratios[clean_key] = value['mean_scale_mm']
-            elif isinstance(value, (int, float)):
-                # Simple format: {"image_id": ratio}
-                clean_key = key.replace('.png', '')
-                pixel_mm_ratios[clean_key] = value
-
     masks_path = Path(masks_dir)
+    scale_maps_path = Path(scale_maps_dir)
     rgb_path = Path(rgb_dir) if rgb_dir else None
     image_shape = (image_height, image_width)
 
     clusters = clusters_data.get('clusters', [])
     logger.info(f"Measuring {len(clusters)} clusters...")
+    logger.info(f"Scale maps directory: {scale_maps_dir}")
     if rgb_path and use_edge_width:
         logger.info(f"Using edge-based width measurement with RGB from: {rgb_dir}")
     else:
@@ -865,7 +864,7 @@ def run_measurement(
             cluster,
             crack_points_lookup,
             masks_path,
-            pixel_mm_ratios,
+            scale_maps_path,
             image_shape,
             n_segments,
             rgb_path,
@@ -918,8 +917,8 @@ if __name__ == '__main__':
                        help='Input crack_points.json')
     parser.add_argument('--masks-dir', required=True,
                        help='YOLO masks directory')
-    parser.add_argument('--pixel-mm', required=True,
-                       help='pixel_mm_ratio.json')
+    parser.add_argument('--scale-maps-dir', required=True,
+                       help='Directory containing scale_map_iso_*.npy files')
     parser.add_argument('--output', required=True,
                        help='Output cluster_measurements.json')
     parser.add_argument('--image-width', type=int, default=3840)
@@ -942,7 +941,7 @@ if __name__ == '__main__':
             args.clusters,
             args.crack_points,
             args.masks_dir,
-            args.pixel_mm,
+            args.scale_maps_dir,
             args.output,
             args.image_width,
             args.image_height,
