@@ -540,6 +540,130 @@ def measure_width_along_normal(
     return positive_dist + negative_dist + 1
 
 
+def calculate_direct_scan_width(
+    skeleton: np.ndarray,
+    grayscale: np.ndarray,
+    mask: np.ndarray,
+    scale_map: np.ndarray,
+    sample_interval: int = 5,
+    intensity_threshold: float = 0.7,
+    max_distance: int = 50
+) -> Tuple[float, float]:
+    """
+    Measure crack width by directly scanning grayscale along skeleton perpendicular.
+
+    At each skeleton pixel, scan perpendicular direction and count consecutive
+    dark pixels (below threshold relative to local background).
+
+    Args:
+        skeleton: Binary skeleton image
+        grayscale: Grayscale image
+        mask: YOLO mask (to get local background)
+        scale_map: Per-pixel mm/px scale map
+        sample_interval: Sample every N skeleton pixels
+        intensity_threshold: Ratio to background intensity (0.7 = 70% of background)
+        max_distance: Maximum scan distance in pixels
+
+    Returns:
+        (average_width_mm, max_width_mm)
+    """
+    # Find skeleton pixels
+    rows, cols = np.where(skeleton > 0)
+
+    if len(rows) < 3:
+        return 0.0, 0.0
+
+    # Get background intensity from mask edge region
+    # Dilate mask and subtract original to get edge pixels
+    kernel = np.ones((5, 5), np.uint8)
+    dilated = cv2.dilate(mask.astype(np.uint8), kernel, iterations=2)
+    edge_region = dilated - mask.astype(np.uint8)
+    edge_pixels = grayscale[edge_region > 0]
+
+    if len(edge_pixels) > 0:
+        background_intensity = np.median(edge_pixels)
+    else:
+        background_intensity = np.median(grayscale[mask > 0])
+
+    dark_threshold = background_intensity * intensity_threshold
+
+    # Sample skeleton pixels
+    n_pixels = len(rows)
+    sample_indices = range(0, n_pixels, sample_interval)
+
+    widths = []
+
+    for idx in sample_indices:
+        r, c = rows[idx], cols[idx]
+
+        # Get scale at this pixel with fallback
+        D = get_scale_with_fallback(scale_map, r, c)
+        if D == 0:
+            continue
+
+        # Estimate local direction from nearby skeleton pixels
+        window = 3
+        nearby_rows = rows[max(0, idx-window):min(n_pixels, idx+window+1)]
+        nearby_cols = cols[max(0, idx-window):min(n_pixels, idx+window+1)]
+
+        if len(nearby_rows) < 2:
+            continue
+
+        # Get direction
+        dr = nearby_rows[-1] - nearby_rows[0]
+        dc = nearby_cols[-1] - nearby_cols[0]
+
+        # Perpendicular direction (normal)
+        length = np.sqrt(dr**2 + dc**2)
+        if length < 1e-6:
+            continue
+
+        nr, nc = -dc / length, dr / length
+
+        # Scan in both directions to find consecutive dark pixels
+        height, width = grayscale.shape
+        positive_dist = 0
+        negative_dist = 0
+
+        # Positive direction
+        for d in range(1, max_distance):
+            new_r = int(round(r + d * nr))
+            new_c = int(round(c + d * nc))
+
+            if not (0 <= new_r < height and 0 <= new_c < width):
+                break
+
+            if grayscale[new_r, new_c] > dark_threshold:
+                break
+
+            positive_dist = d
+
+        # Negative direction
+        for d in range(1, max_distance):
+            new_r = int(round(r - d * nr))
+            new_c = int(round(c - d * nc))
+
+            if not (0 <= new_r < height and 0 <= new_c < width):
+                break
+
+            if grayscale[new_r, new_c] > dark_threshold:
+                break
+
+            negative_dist = d
+
+        # Total width in pixels (including center)
+        width_pixels = positive_dist + negative_dist + 1
+
+        if width_pixels > 1:  # At least some width detected
+            width_mm = width_pixels * D
+            widths.append(width_mm)
+
+    if widths:
+        return float(np.mean(widths)), float(np.max(widths))
+    else:
+        return 0.0, 0.0
+
+
 def detect_crack_pixels_in_mask(
     grayscale: np.ndarray,
     mask: np.ndarray,
@@ -1139,16 +1263,32 @@ def measure_segment_2d(
                 # Convert to grayscale
                 grayscale = cv2.cvtColor(rgb_img, cv2.COLOR_BGR2GRAY)
 
-                # Use intensity-based crack detection within mask
-                # This measures actual dark crack pixels, not mask boundary
-                # detection_method and sample_interval will be passed from caller
-                avg_width_mm, max_width_mm = calculate_intensity_based_width(
-                    skeleton, grayscale, binary_mask, scale_map,
-                    sample_interval=sample_interval,
-                    detection_method=detection_method,
-                    min_component_ratio=min_component_ratio
-                )
-                width_method = 'intensity'
+                # Check detection method
+                if detection_method.startswith('direct'):
+                    # Direct scan mode: scan grayscale along skeleton perpendicular
+                    # Extract intensity threshold from method string (e.g., 'direct_0.6')
+                    intensity_threshold = 0.7  # default
+                    if '_' in detection_method:
+                        try:
+                            intensity_threshold = float(detection_method.split('_')[1])
+                        except:
+                            pass
+
+                    avg_width_mm, max_width_mm = calculate_direct_scan_width(
+                        skeleton, grayscale, binary_mask, scale_map,
+                        sample_interval=sample_interval,
+                        intensity_threshold=intensity_threshold
+                    )
+                    width_method = 'direct'
+                else:
+                    # Gradient/percentile based detection
+                    avg_width_mm, max_width_mm = calculate_intensity_based_width(
+                        skeleton, grayscale, binary_mask, scale_map,
+                        sample_interval=sample_interval,
+                        detection_method=detection_method,
+                        min_component_ratio=min_component_ratio
+                    )
+                    width_method = 'intensity'
 
                 # Generate visualization if requested
                 if viz_dir:
@@ -1337,6 +1477,7 @@ def run_measurement(
     detection_method: str = 'gradient',
     crack_percentile: float = 30.0,
     gradient_percentile: float = 70.0,
+    intensity_threshold: float = 0.7,
     sample_interval: int = 5,
     min_component_ratio: float = 0.1,
     viz_dir: str = None
@@ -1390,12 +1531,14 @@ def run_measurement(
     measurements = []
 
     for idx, cluster in enumerate(clusters):
-        # Build detection method string with percentile value
+        # Build detection method string with threshold value
         method_str = detection_method
         if detection_method == 'percentile':
             method_str = f'percentile_{crack_percentile}'
         elif detection_method == 'gradient':
             method_str = f'gradient_{gradient_percentile}'
+        elif detection_method == 'direct':
+            method_str = f'direct_{intensity_threshold}'
 
         measurement = measure_cluster(
             cluster,
@@ -1481,12 +1624,14 @@ if __name__ == '__main__':
     parser.add_argument('--no-edge-width', action='store_true',
                        help='Disable intensity-based width measurement (use mask-based)')
     parser.add_argument('--detection-method', default='gradient',
-                       choices=['gradient', 'percentile', 'adaptive', 'otsu'],
-                       help='Crack detection method: gradient (edge-based), percentile (darkest N%%), adaptive, otsu')
+                       choices=['gradient', 'percentile', 'adaptive', 'otsu', 'direct'],
+                       help='Crack detection: gradient (edge), percentile (dark), direct (skeleton scan)')
     parser.add_argument('--crack-percentile', type=float, default=30.0,
                        help='Percentile threshold for dark pixels (default: 30, lower=stricter)')
     parser.add_argument('--gradient-percentile', type=float, default=70.0,
                        help='Percentile threshold for gradient (default: 70, higher=stricter edge detection)')
+    parser.add_argument('--intensity-threshold', type=float, default=0.7,
+                       help='For direct mode: dark pixel threshold as ratio of background (default: 0.7)')
     parser.add_argument('--min-component-ratio', type=float, default=0.1,
                        help='Min component size as ratio of largest (default: 0.1, higher=stricter)')
     parser.add_argument('--sample-interval', type=int, default=5,
@@ -1515,6 +1660,7 @@ if __name__ == '__main__':
             args.detection_method,
             args.crack_percentile,
             args.gradient_percentile,
+            args.intensity_threshold,
             args.sample_interval,
             args.min_component_ratio,
             args.viz_dir
