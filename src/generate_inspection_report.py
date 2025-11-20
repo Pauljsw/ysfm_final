@@ -546,11 +546,7 @@ def generate_inspection_diagram(
                        color=color)
 
     ax.set_aspect('equal')
-    ax.set_xlabel('X (m)')
-    ax.set_ylabel('Y (m)')
-    ax.set_title(title)
-    ax.legend(loc='upper right', fontsize=8)
-    ax.grid(True, alpha=0.3)
+    ax.axis('off')
 
     plt.tight_layout()
     plt.savefig(output_path, dpi=150, bbox_inches='tight')
@@ -664,10 +660,7 @@ def generate_combined_report(
                               fontsize=8, fontweight='bold', color=color)
 
     ax_diagram.set_aspect('equal')
-    ax_diagram.set_xlabel('X (m)', fontsize=10)
-    ax_diagram.set_ylabel('Y (m)', fontsize=10)
-    ax_diagram.set_title('Crack Location Diagram', fontsize=12, fontweight='bold')
-    ax_diagram.grid(True, alpha=0.3)
+    ax_diagram.axis('off')
 
     # Right: Table (35% width)
     ax_table = fig.add_axes([0.58, 0.1, 0.38, 0.8])
