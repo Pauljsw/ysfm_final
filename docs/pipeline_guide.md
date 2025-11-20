@@ -165,13 +165,83 @@ python -m src.point_cloud_overlay \
 
 ---
 
+## Phase 3.5: Point Cloud Upsampling
+
+### 목적
+Sparse SfM 포인트 클라우드의 밀도를 증가시켜 DBSCAN 클러스터링 성능 향상
+
+### Input
+- `outputs/crack_points.json` (Phase 3)
+
+### Output
+- `outputs/crack_points_upsampled.json` - 업샘플링된 포인트:
+  ```json
+  {
+    "metadata": {
+      "original_points": 1000,
+      "synthetic_points": 2500,
+      "total_points": 3500
+    },
+    "points": [
+      {
+        "point_id": 0,
+        "xyz": [x, y, z],
+        "is_synthetic": false,
+        "sources": [...]
+      },
+      {
+        "point_id": 1000,
+        "xyz": [x, y, z],
+        "is_synthetic": true,
+        "parent_ids": [0, 5]
+      }
+    ]
+  }
+  ```
+
+### 실행 명령
+```bash
+python -m src.upsample_crack_points \
+    --input outputs/crack_points.json \
+    --output outputs/crack_points_upsampled.json \
+    --method density \
+    --k-neighbors 5 \
+    --max-distance 0.1 \
+    --min-spacing 0.005
+```
+
+### 왜 필요한가?
+- SfM sparse reconstruction은 점 밀도가 낮아 DBSCAN이 균열을 제대로 클러스터링하지 못함
+- KNN 기반 선형 보간으로 점 밀도 증가
+- Two-Tier Point System: synthetic 점은 클러스터링에만 사용, 마스크 선택에서는 제외
+
+### 주요 파라미터
+
+**Method: density (권장)**
+- `--min-spacing`: 목표 최소 점 간격 (meters, 기본 0.005 = 5mm)
+- `--k-neighbors`: 보간에 사용할 이웃 수 (기본 5)
+- `--max-distance`: 보간 최대 거리 (meters, 기본 0.1 = 10cm)
+
+**Method: fixed**
+- `--n-interpolations`: 엣지당 고정 보간 개수 (기본 2)
+
+### 파라미터 조절 가이드
+
+| 상황 | 권장 설정 |
+|------|-----------|
+| 밀도가 너무 낮음 | `--min-spacing` 감소 (예: 0.003) |
+| 밀도가 너무 높음 | `--min-spacing` 증가 (예: 0.01) |
+| 잘못된 점 연결 발생 | `--max-distance` 감소 (예: 0.05) |
+
+---
+
 ## Phase 4: DBSCAN Clustering
 
 ### 목적
 균열 3D 포인트들을 개별 균열로 클러스터링
 
 ### Input
-- `outputs/crack_points.json` (Phase 3)
+- `outputs/crack_points_upsampled.json` (Phase 3.5)
 
 ### Output
 - `outputs/crack_clusters.json` - 클러스터 정보:
@@ -193,7 +263,7 @@ python -m src.point_cloud_overlay \
 ### 실행 명령
 ```bash
 python -m src.cluster_crack_points_dbscan \
-    --input outputs/crack_points.json \
+    --input outputs/crack_points_upsampled.json \
     --output outputs/crack_clusters.json \
     --output-ply outputs/clustered_cracks.ply \
     --eps 0.05 \
@@ -237,10 +307,10 @@ python -m src.cluster_crack_points_dbscan \
 
 ### Input
 - `outputs/crack_clusters.json` (Phase 4)
-- `outputs/crack_points.json` (Phase 3)
+- `outputs/crack_points_upsampled.json` (Phase 3.5)
 - `data/yolo_masks/*.json` (Phase 1)
 - `outputs/d2c_pixel_scale/scale_map_iso_*.npy` (Phase 2)
-- `data/rgb/*.png` (Phase 0) - edge 기반 폭 측정용
+- `data/rgb/*.png` (Phase 0) - gradient 기반 폭 측정용
 
 ### Output
 - `outputs/cluster_measurements.json`:
@@ -271,7 +341,7 @@ python -m src.cluster_crack_points_dbscan \
 ```bash
 python -m src.measure_clusters \
     --clusters outputs/crack_clusters.json \
-    --crack-points outputs/crack_points.json \
+    --crack-points outputs/crack_points_upsampled.json \
     --masks-dir data/yolo_masks \
     --scale-maps-dir outputs/d2c_pixel_scale \
     --rgb-dir data/rgb \
@@ -320,8 +390,9 @@ python -m src.measure_clusters \
 | 1. YOLO | RGB images | yolo_masks/ |
 | 2. D2C Scale | Depth, Calibrations | scale_map_iso_*.npy |
 | 3. Overlay | Phase 0, 1 | crack_points.json |
-| 4. Clustering | Phase 3 | crack_clusters.json |
-| 5. Measurement | Phase 1, 2, 3, 4 | cluster_measurements.json |
+| 3.5 Upsampling | Phase 3 | crack_points_upsampled.json |
+| 4. Clustering | Phase 3.5 | crack_clusters.json |
+| 5. Measurement | Phase 1, 2, 3.5, 4 | cluster_measurements.json |
 
 ---
 
@@ -349,9 +420,16 @@ python -m src.point_cloud_overlay \
     --output outputs/sfm_masked_cloud.ply \
     --output-json outputs/crack_points.json
 
+# Phase 3.5: Upsampling
+python -m src.upsample_crack_points \
+    --input outputs/crack_points.json \
+    --output outputs/crack_points_upsampled.json \
+    --method density --k-neighbors 5 \
+    --max-distance 0.1 --min-spacing 0.005
+
 # Phase 4: DBSCAN Clustering (with direction-aware merging)
 python -m src.cluster_crack_points_dbscan \
-    --input outputs/crack_points.json \
+    --input outputs/crack_points_upsampled.json \
     --output outputs/crack_clusters.json \
     --output-ply outputs/clustered_cracks.ply \
     --eps 0.05 --min-samples 10 \
@@ -360,7 +438,7 @@ python -m src.cluster_crack_points_dbscan \
 # Phase 5: Measurement
 python -m src.measure_clusters \
     --clusters outputs/crack_clusters.json \
-    --crack-points outputs/crack_points.json \
+    --crack-points outputs/crack_points_upsampled.json \
     --masks-dir data/yolo_masks \
     --scale-maps-dir outputs/d2c_pixel_scale \
     --rgb-dir data/rgb \

@@ -255,6 +255,9 @@ def find_best_mask_for_segment(segment: Dict) -> Optional[Tuple[str, int]]:
     """
     Find the best (image_id, mask_id) for a segment based on point contribution.
 
+    Note: Synthetic points (from upsampling) are excluded from voting
+    since they don't have valid source information.
+
     Returns:
         (image_id, mask_id) or None if no masks found
     """
@@ -262,6 +265,10 @@ def find_best_mask_for_segment(segment: Dict) -> Optional[Tuple[str, int]]:
     mask_contributions = defaultdict(int)
 
     for point in segment['points']:
+        # Skip synthetic points - they don't have valid source information
+        if point.get('is_synthetic', False):
+            continue
+
         for source in point.get('source_masks', []):
             key = (source['image_id'], source['mask_id'])
             mask_contributions[key] += 1
@@ -1443,8 +1450,11 @@ def measure_cluster(
             continue
 
         # Extract UV coordinates for this segment from points that belong to best_mask
+        # Note: Skip synthetic points as they don't have valid UV coordinates
         segment_uvs = []
         for point in segment['points']:
+            if point.get('is_synthetic', False):
+                continue
             for source in point.get('source_masks', []):
                 if source['image_id'] == image_id and source['mask_id'] == mask_id:
                     if 'uv' in source:
