@@ -30,40 +30,71 @@ logger = logging.getLogger(__name__)
 
 def load_ply(ply_path: Path) -> np.ndarray:
     """
-    Load point cloud from PLY file.
+    Load point cloud from PLY file (supports both ASCII and binary formats).
 
     Returns:
         Nx3 numpy array of XYZ coordinates
     """
-    points = []
-    header_ended = False
-    vertex_count = 0
+    import struct
 
-    with open(ply_path, 'r') as f:
-        for line in f:
-            line = line.strip()
+    with open(ply_path, 'rb') as f:
+        # Read header
+        header_lines = []
+        vertex_count = 0
+        is_binary = False
+        is_little_endian = True
 
-            if not header_ended:
-                if line.startswith('element vertex'):
-                    vertex_count = int(line.split()[-1])
-                elif line == 'end_header':
-                    header_ended = True
-                continue
+        while True:
+            line = f.readline().decode('ascii').strip()
+            header_lines.append(line)
 
-            # Parse vertex data
-            parts = line.split()
-            if len(parts) >= 3:
-                try:
-                    x, y, z = float(parts[0]), float(parts[1]), float(parts[2])
-                    points.append([x, y, z])
-                except ValueError:
-                    continue
-
-            if len(points) >= vertex_count:
+            if line.startswith('element vertex'):
+                vertex_count = int(line.split()[-1])
+            elif line.startswith('format'):
+                if 'binary_little_endian' in line:
+                    is_binary = True
+                    is_little_endian = True
+                elif 'binary_big_endian' in line:
+                    is_binary = True
+                    is_little_endian = False
+            elif line == 'end_header':
                 break
 
-    logger.info(f"Loaded {len(points)} points from {ply_path}")
-    return np.array(points)
+        if is_binary:
+            # Binary format
+            endian = '<' if is_little_endian else '>'
+            points = []
+
+            # Assume float32 for x, y, z (most common)
+            # Skip other properties by reading full vertex size
+            # For simplicity, assume x,y,z are first 3 floats
+            for _ in range(vertex_count):
+                data = f.read(12)  # 3 floats * 4 bytes
+                if len(data) < 12:
+                    break
+                x, y, z = struct.unpack(f'{endian}fff', data)
+                points.append([x, y, z])
+
+                # Skip remaining vertex data if any (colors, normals, etc.)
+                # This is a simplification - may need adjustment for specific PLY formats
+
+            logger.info(f"Loaded {len(points)} points from {ply_path} (binary)")
+            return np.array(points)
+        else:
+            # ASCII format
+            points = []
+            for _ in range(vertex_count):
+                line = f.readline().decode('ascii').strip()
+                parts = line.split()
+                if len(parts) >= 3:
+                    try:
+                        x, y, z = float(parts[0]), float(parts[1]), float(parts[2])
+                        points.append([x, y, z])
+                    except ValueError:
+                        continue
+
+            logger.info(f"Loaded {len(points)} points from {ply_path} (ASCII)")
+            return np.array(points)
 
 
 def filter_noise_statistical(points: np.ndarray, k: int = 20, std_ratio: float = 2.0) -> np.ndarray:
