@@ -251,6 +251,39 @@ def split_cluster_by_direction(
 
             # Only split if angle difference is significant
             if max_angle >= split_angle_threshold:
+                # Additional check: sub-clusters should be spatially separated
+                # If points are spatially intermixed, don't split
+                spatially_separated = True
+
+                for i in range(len(sub_axes)):
+                    for j in range(i + 1, len(sub_axes)):
+                        mask_i = dir_labels == i
+                        mask_j = dir_labels == j
+
+                        points_i = points_xyz[mask_i]
+                        points_j = points_xyz[mask_j]
+
+                        # Check centroid distance between sub-clusters
+                        centroid_i = np.mean(points_i, axis=0)
+                        centroid_j = np.mean(points_j, axis=0)
+                        centroid_dist = np.linalg.norm(centroid_i - centroid_j)
+
+                        # Check overlap: if centroids are too close relative to cluster size
+                        # the sub-clusters are likely spatially intermixed
+                        size_i = np.max(np.linalg.norm(points_i - centroid_i, axis=1))
+                        size_j = np.max(np.linalg.norm(points_j - centroid_j, axis=1))
+                        min_separation = 0.3 * (size_i + size_j)  # At least 30% of combined size
+
+                        if centroid_dist < min_separation:
+                            spatially_separated = False
+                            break
+
+                    if not spatially_separated:
+                        break
+
+                if not spatially_separated:
+                    continue
+
                 # Score based on angle difference and balance
                 balance = min(sub_counts) / max(sub_counts)
                 score = max_angle * balance
