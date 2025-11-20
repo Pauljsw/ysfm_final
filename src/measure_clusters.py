@@ -578,14 +578,20 @@ def detect_crack_pixels_in_mask(
             cv2.THRESH_BINARY_INV, 21, 10
         )
 
-    elif method == 'percentile':
+    elif method.startswith('percentile'):
         # Use darkest percentile within mask as crack
         mask_pixels = grayscale[mask > 0]
         if len(mask_pixels) == 0:
             return np.zeros_like(mask)
 
-        # Cracks are typically in the darkest 20-30% of mask pixels
-        threshold = np.percentile(mask_pixels, 30)
+        # Extract percentile value from method string (e.g., 'percentile_25')
+        percentile_val = 30  # default
+        if '_' in method:
+            try:
+                percentile_val = float(method.split('_')[1])
+            except:
+                pass
+        threshold = np.percentile(mask_pixels, percentile_val)
         crack_binary = (grayscale < threshold).astype(np.uint8) * 255
     else:
         raise ValueError(f"Unknown method: {method}")
@@ -833,7 +839,9 @@ def measure_segment_2d(
     image_shape: Tuple[int, int] = (2160, 3840),
     margin: int = 50,
     rgb_dir: Path = None,
-    use_edge_width: bool = True
+    use_edge_width: bool = True,
+    detection_method: str = 'percentile_30',
+    sample_interval: int = 5
 ) -> Dict:
     """
     Measure a segment using 2D skeleton method with per-pixel scale map.
@@ -914,9 +922,11 @@ def measure_segment_2d(
 
                 # Use intensity-based crack detection within mask
                 # This measures actual dark crack pixels, not mask boundary
+                # detection_method and sample_interval will be passed from caller
                 avg_width_mm, max_width_mm = calculate_intensity_based_width(
                     skeleton, grayscale, binary_mask, scale_map,
-                    sample_interval=5, detection_method='percentile'
+                    sample_interval=sample_interval,
+                    detection_method=detection_method
                 )
                 width_method = 'intensity'
 
@@ -947,7 +957,9 @@ def measure_cluster(
     image_shape: Tuple[int, int],
     n_segments: int = 5,
     rgb_dir: Path = None,
-    use_edge_width: bool = True
+    use_edge_width: bool = True,
+    detection_method: str = 'percentile_30',
+    sample_interval: int = 5
 ) -> Dict:
     """
     Measure a single cluster.
@@ -1037,10 +1049,11 @@ def measure_cluster(
                         segment_uvs.append(source['uv'])
                     break
 
-        # Measure in 2D with segment cropping and edge-based width
+        # Measure in 2D with segment cropping and intensity-based width
         measurement = measure_segment_2d(
             masks_dir, image_id, mask_id, scale_map, segment_uvs, image_shape,
-            margin=50, rgb_dir=rgb_dir, use_edge_width=use_edge_width
+            margin=50, rgb_dir=rgb_dir, use_edge_width=use_edge_width,
+            detection_method=detection_method, sample_interval=sample_interval
         )
 
         measurement['segment_id'] = segment['segment_id']
@@ -1084,7 +1097,10 @@ def run_measurement(
     image_height: int = 2160,
     n_segments: int = 5,
     rgb_dir: str = None,
-    use_edge_width: bool = True
+    use_edge_width: bool = True,
+    detection_method: str = 'percentile',
+    crack_percentile: float = 30.0,
+    sample_interval: int = 5
 ):
     """
     Run measurement on all clusters using per-pixel scale maps.
@@ -1116,7 +1132,11 @@ def run_measurement(
     logger.info(f"Measuring {len(clusters)} clusters...")
     logger.info(f"Scale maps directory: {scale_maps_dir}")
     if rgb_path and use_edge_width:
-        logger.info(f"Using edge-based width measurement with RGB from: {rgb_dir}")
+        logger.info(f"Using intensity-based width measurement with RGB from: {rgb_dir}")
+        logger.info(f"  Detection method: {detection_method}")
+        if detection_method == 'percentile':
+            logger.info(f"  Crack percentile: {crack_percentile}%")
+        logger.info(f"  Sample interval: {sample_interval}")
     else:
         logger.info("Using mask-based width measurement")
 
@@ -1127,6 +1147,11 @@ def run_measurement(
     measurements = []
 
     for idx, cluster in enumerate(clusters):
+        # Build detection method string with percentile value
+        method_str = detection_method
+        if detection_method == 'percentile':
+            method_str = f'percentile_{crack_percentile}'
+
         measurement = measure_cluster(
             cluster,
             crack_points_lookup,
@@ -1135,7 +1160,9 @@ def run_measurement(
             image_shape,
             n_segments,
             rgb_path,
-            use_edge_width
+            use_edge_width,
+            method_str,
+            sample_interval
         )
 
         # Add color information
@@ -1203,9 +1230,16 @@ if __name__ == '__main__':
     parser.add_argument('--n-segments', type=int, default=5,
                        help='Number of segments per cluster (default: 5)')
     parser.add_argument('--rgb-dir', default=None,
-                       help='RGB images directory (for edge-based width measurement)')
+                       help='RGB images directory (for intensity-based width measurement)')
     parser.add_argument('--no-edge-width', action='store_true',
-                       help='Disable edge-based width measurement (use mask-based)')
+                       help='Disable intensity-based width measurement (use mask-based)')
+    parser.add_argument('--detection-method', default='percentile',
+                       choices=['percentile', 'adaptive', 'otsu'],
+                       help='Crack detection method: percentile (darkest N%%), adaptive, otsu')
+    parser.add_argument('--crack-percentile', type=float, default=30.0,
+                       help='Percentile threshold for crack pixels (default: 30, lower=stricter)')
+    parser.add_argument('--sample-interval', type=int, default=5,
+                       help='Sample every N skeleton pixels for width (default: 5)')
     parser.add_argument('--log-level', default='INFO',
                        choices=['DEBUG', 'INFO', 'WARNING', 'ERROR'])
 
@@ -1224,7 +1258,10 @@ if __name__ == '__main__':
             args.image_height,
             args.n_segments,
             args.rgb_dir,
-            not args.no_edge_width
+            not args.no_edge_width,
+            args.detection_method,
+            args.crack_percentile,
+            args.sample_interval
         )
 
         if measurements:
