@@ -34,7 +34,7 @@ def is_pixel_in_crack_mask(
     pixel_xy: Tuple[float, float],
     image_stem: str = None,
     min_confidence: float = 0.0
-) -> Tuple[bool, float]:
+) -> Tuple[bool, float, int]:
     """
     Check if pixel is inside any crack polygon with confidence validation.
 
@@ -45,10 +45,11 @@ def is_pixel_in_crack_mask(
         min_confidence: Minimum YOLO confidence to consider (default: 0.0)
 
     Returns:
-        (is_inside, confidence): True if pixel is in valid crack mask, and confidence score
+        (is_inside, confidence, mask_id): True if pixel is in valid crack mask,
+                                          confidence score, and mask index (-1 if not found)
     """
     if 'masks' not in mask_json:
-        return False, 0.0
+        return False, 0.0, -1
 
     point = ShapelyPoint(pixel_xy)
 
@@ -77,7 +78,7 @@ def is_pixel_in_crack_mask(
             if not poly.is_valid:
                 try:
                     fixed_poly = poly.buffer(0)
-                    
+
                     # 🆕 Verify the fix was successful
                     if not fixed_poly.is_valid or fixed_poly.is_empty:
                         if image_stem:
@@ -85,16 +86,16 @@ def is_pixel_in_crack_mask(
                                 f"[{image_stem}] Mask {mask_idx}: Cannot fix invalid polygon, skipping"
                             )
                         continue
-                    
+
                     # Use fixed polygon
                     poly = fixed_poly
-                    
+
                     if image_stem:
                         logger.debug(
                             f"[{image_stem}] Mask {mask_idx}: Auto-fixed invalid polygon "
                             f"(area={poly.area:.2f}, confidence={confidence:.3f})"
                         )
-                        
+
                 except Exception as e:
                     # If buffer(0) fails, skip this polygon
                     if image_stem:
@@ -120,7 +121,7 @@ def is_pixel_in_crack_mask(
                 continue
 
             if poly.contains(point):
-                return True, confidence
+                return True, confidence, mask_idx
 
         except Exception as e:
             if image_stem:
@@ -129,13 +130,14 @@ def is_pixel_in_crack_mask(
                 )
             continue
 
-    return False, 0.0
+    return False, 0.0, -1
 
 
 def overlay_masks_on_pointcloud(
     sparse_dir: str,
     masks_dir: str,
     output_ply: str,
+    output_json: str = None,
     crack_color: Tuple[int, int, int] = (255, 0, 0),
     min_track_length: int = 2,
     vote_threshold: float = 0.5,
@@ -148,6 +150,7 @@ def overlay_masks_on_pointcloud(
         sparse_dir: COLMAP sparse/0 directory
         masks_dir: YOLO masks directory
         output_ply: Output PLY path
+        output_json: Output JSON path for crack points with mapping info (optional)
         crack_color: RGB color for crack points (default: red)
         min_track_length: Minimum track length to include point
         vote_threshold: Minimum ratio of views that must agree (default: 0.5 = majority)
@@ -202,6 +205,9 @@ def overlay_masks_on_pointcloud(
     confidence_scores = []
     view_counts = []
 
+    # Crack points with mapping info
+    crack_points_data = []
+
     for point_id, point in points3D.items():
         xyz = point.xyz
         original_rgb = point.rgb
@@ -215,6 +221,7 @@ def overlay_masks_on_pointcloud(
         crack_votes = 0
         total_votes = 0
         confidence_sum = 0.0
+        source_masks = []  # Mapping info
 
         for img_id, point2D_idx in zip(point.image_ids, point.point2D_idxs):
             if img_id not in images:
@@ -237,7 +244,7 @@ def overlay_masks_on_pointcloud(
             total_votes += 1
 
             # Check mask with confidence filtering
-            is_in_mask, mask_confidence = is_pixel_in_crack_mask(
+            is_in_mask, mask_confidence, mask_id = is_pixel_in_crack_mask(
                 masks[image_stem],
                 pixel_xy,
                 image_stem,
@@ -247,6 +254,11 @@ def overlay_masks_on_pointcloud(
             if is_in_mask:
                 crack_votes += 1
                 confidence_sum += mask_confidence
+                source_masks.append({
+                    'image_id': image_stem,
+                    'mask_id': mask_id,
+                    'confidence': mask_confidence
+                })
 
         # Decision based on voting
         if total_votes > 0:
@@ -260,6 +272,16 @@ def overlay_masks_on_pointcloud(
             if is_crack:
                 vote_counts.append(crack_votes)
                 confidence_scores.append(avg_confidence)
+
+                # Store crack point with mapping info
+                crack_points_data.append({
+                    'point_id': int(point_id),
+                    'xyz': xyz.tolist(),
+                    'source_masks': source_masks,
+                    'vote_ratio': vote_ratio,
+                    'avg_confidence': avg_confidence,
+                    'n_views': len(source_masks)
+                })
         else:
             is_crack = False
 
@@ -339,6 +361,32 @@ def overlay_masks_on_pointcloud(
     logger.info(f"\nSaving point cloud to: {output_ply}")
     save_ply(output_ply, xyz_list, rgb_list)
 
+    # Save JSON with mapping info (optional)
+    if output_json:
+        logger.info(f"Saving crack points with mapping info to: {output_json}")
+
+        json_output = {
+            'metadata': {
+                'total_points': len(xyz_list),
+                'crack_points': crack_count,
+                'skipped_points': skipped_count,
+                'vote_threshold': vote_threshold,
+                'min_confidence': min_confidence,
+                'min_track_length': min_track_length,
+                'avg_confidence': metrics.get('avg_confidence', 0.0),
+                'avg_views_per_crack': metrics.get('avg_votes_per_crack', 0.0)
+            },
+            'points': crack_points_data
+        }
+
+        output_json_path = Path(output_json)
+        output_json_path.parent.mkdir(parents=True, exist_ok=True)
+
+        with open(output_json, 'w') as f:
+            json.dump(json_output, f, indent=2)
+
+        logger.info(f"  Saved {len(crack_points_data)} crack points with mapping info")
+
     logger.info("=" * 80)
     logger.info("Point cloud overlay complete!")
     logger.info("=" * 80)
@@ -405,6 +453,8 @@ if __name__ == '__main__':
                        help='YOLO masks directory')
     parser.add_argument('--output', required=True,
                        help='Output PLY path')
+    parser.add_argument('--output-json', default=None,
+                       help='Output JSON path for crack points with mapping info (optional)')
     parser.add_argument('--crack-color', type=int, nargs=3, default=[255, 0, 0],
                        help='RGB color for crack points (default: 255 0 0)')
     parser.add_argument('--min-track-length', type=int, default=2,
@@ -425,6 +475,7 @@ if __name__ == '__main__':
             args.sparse_dir,
             args.masks_dir,
             args.output,
+            args.output_json,
             tuple(args.crack_color),
             args.min_track_length,
             args.vote_threshold,
