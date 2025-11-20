@@ -28,12 +28,12 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 
-def load_ply(ply_path: Path) -> np.ndarray:
+def load_ply_with_colors(ply_path: Path) -> Tuple[np.ndarray, np.ndarray]:
     """
-    Load point cloud from PLY file (supports both ASCII and binary formats).
+    Load point cloud with colors from PLY file.
 
     Returns:
-        Nx3 numpy array of XYZ coordinates
+        (points, colors): Nx3 XYZ array, Nx3 RGB array (0-255)
     """
     import struct
 
@@ -78,28 +78,43 @@ def load_ply(ply_path: Path) -> np.ndarray:
             elif line == 'end_header':
                 break
 
-        # Calculate vertex size
-        vertex_size = sum(type_sizes.get(prop[1], 4) for prop in vertex_properties)
-        if vertex_size == 0:
-            vertex_size = 12  # Default: just xyz floats
+        # Find property indices
+        prop_names = [p[0] for p in vertex_properties]
+        has_color = 'red' in prop_names and 'green' in prop_names and 'blue' in prop_names
+
+        # Calculate offsets for each property
+        prop_offsets = {}
+        offset = 0
+        for name, ptype in vertex_properties:
+            prop_offsets[name] = offset
+            offset += type_sizes.get(ptype, 4)
+        vertex_size = offset if offset > 0 else 12
+
+        points = []
+        colors = []
 
         if is_binary:
-            # Binary format
             endian = '<' if is_little_endian else '>'
-            points = []
 
             for _ in range(vertex_count):
                 data = f.read(vertex_size)
                 if len(data) < vertex_size:
                     break
-                # First 3 floats are x, y, z
+
+                # Extract XYZ
                 x, y, z = struct.unpack(f'{endian}fff', data[:12])
                 points.append([x, y, z])
 
-            points = np.array(points)
+                # Extract RGB if available
+                if has_color:
+                    r = data[prop_offsets['red']]
+                    g = data[prop_offsets['green']]
+                    b = data[prop_offsets['blue']]
+                    colors.append([r, g, b])
+                else:
+                    colors.append([128, 128, 128])
         else:
             # ASCII format
-            points = []
             for _ in range(vertex_count):
                 line = f.readline().decode('ascii').strip()
                 parts = line.split()
@@ -107,9 +122,17 @@ def load_ply(ply_path: Path) -> np.ndarray:
                     try:
                         x, y, z = float(parts[0]), float(parts[1]), float(parts[2])
                         points.append([x, y, z])
+
+                        if has_color and len(parts) >= 6:
+                            r, g, b = int(parts[3]), int(parts[4]), int(parts[5])
+                            colors.append([r, g, b])
+                        else:
+                            colors.append([128, 128, 128])
                     except ValueError:
                         continue
-            points = np.array(points)
+
+        points = np.array(points)
+        colors = np.array(colors)
 
         # Filter NaN and Inf values
         if len(points) > 0:
@@ -118,9 +141,38 @@ def load_ply(ply_path: Path) -> np.ndarray:
             if n_invalid > 0:
                 logger.warning(f"Removed {n_invalid} points with NaN/Inf values")
             points = points[valid_mask]
+            colors = colors[valid_mask]
 
         logger.info(f"Loaded {len(points)} points from {ply_path}")
-        return points
+        return points, colors
+
+
+def group_points_by_color(points: np.ndarray, colors: np.ndarray) -> List[Tuple[Tuple[int, int, int], np.ndarray]]:
+    """
+    Group points by their RGB color.
+
+    Returns:
+        List of (color_tuple, points_array) sorted by x-coordinate of centroid
+    """
+    # Group by color
+    color_groups = {}
+    for i, (point, color) in enumerate(zip(points, colors)):
+        color_key = tuple(color)
+        if color_key not in color_groups:
+            color_groups[color_key] = []
+        color_groups[color_key].append(point)
+
+    # Convert to arrays and sort by centroid x-coordinate
+    result = []
+    for color, pts in color_groups.items():
+        pts_array = np.array(pts)
+        result.append((color, pts_array))
+
+    # Sort by centroid x-coordinate for consistent ordering
+    result.sort(key=lambda x: x[1][:, 0].mean())
+
+    logger.info(f"Found {len(result)} clusters by color")
+    return result
 
 
 def filter_noise_statistical(points: np.ndarray, k: int = 20, std_ratio: float = 2.0) -> np.ndarray:
@@ -432,7 +484,8 @@ def generate_inspection_diagram(
 
     # Collect all crack points to determine bounding box
     all_points = []
-    for cluster_id, polyline in crack_polylines:
+    for item in crack_polylines:
+        polyline = item[1]  # Second element is always polyline
         if polyline is not None and len(polyline) >= 2:
             all_points.extend(polyline.tolist())
 
@@ -469,19 +522,21 @@ def generate_inspection_diagram(
             alpha=0.05, color='lightgray')
 
     # Draw cracks as polylines
-    n_cracks = len(crack_polylines)
-    colors = plt.cm.Set1(np.linspace(0, 1, max(9, n_cracks)))
+    for item in crack_polylines:
+        # Handle both (id, polyline) and (id, polyline, color) formats
+        if len(item) == 3:
+            cluster_id, polyline, color = item
+        else:
+            cluster_id, polyline = item
+            color = plt.cm.Set1(cluster_id / max(1, len(crack_polylines)))
 
-    for i, (cluster_id, polyline) in enumerate(crack_polylines):
         if polyline is not None and len(polyline) >= 2:
-            color = colors[i % len(colors)]
-
             # Draw polyline (smooth crack line)
             ax.plot(polyline[:, 0], polyline[:, 1],
                     linewidth=2.5, color=color, solid_capstyle='round')
 
-            # Add label near start of crack
-            label_pos = polyline[len(polyline)//2]  # Middle point
+            # Add label near middle of crack
+            label_pos = polyline[len(polyline)//2]
             ax.annotate(f'{cluster_id + 1}',
                        xy=label_pos,
                        xytext=(5, 5),
@@ -547,10 +602,8 @@ def main():
     parser = argparse.ArgumentParser(
         description='Generate 2D inspection diagram and measurement table'
     )
-    parser.add_argument('--clusters', type=str, required=True,
-                        help='Path to crack clusters JSON')
-    parser.add_argument('--crack-points', type=str, required=True,
-                        help='Path to crack points JSON')
+    parser.add_argument('--ply', type=str, required=True,
+                        help='Path to clustered_cracks.ply')
     parser.add_argument('--measurements', type=str, required=True,
                         help='Path to cluster measurements JSON')
     parser.add_argument('--output-dir', type=str, default='outputs',
@@ -578,24 +631,39 @@ def main():
     output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    # Load cluster data
-    logger.info(f"Loading clusters: {args.clusters}")
-    clusters = load_clusters(Path(args.clusters))
+    # Load clustered cracks PLY
+    logger.info(f"Loading clustered cracks: {args.ply}")
+    points, colors = load_ply_with_colors(Path(args.ply))
 
-    logger.info(f"Loading crack points: {args.crack_points}")
-    crack_points_lookup = load_crack_points(Path(args.crack_points))
+    # Group by color to identify clusters
+    cluster_groups = group_points_by_color(points, colors)
 
     logger.info(f"Loading measurements: {args.measurements}")
     measurements = load_measurements(Path(args.measurements))
 
-    # Get crack polylines (simple XY projection)
+    # Generate crack polylines from PLY data
     logger.info(f"Generating crack polylines (dropping axis {args.drop_axis})...")
+    axes_to_keep = [i for i in range(3) if i != args.drop_axis]
+
     crack_polylines = []
-    for cluster in clusters:
-        cluster_id = cluster.get('cluster_id', 0)
-        polyline = get_cluster_polyline(cluster, crack_points_lookup, drop_axis=args.drop_axis)
-        if polyline is not None:
-            crack_polylines.append((cluster_id, polyline))
+    for cluster_id, (color, cluster_points) in enumerate(cluster_groups):
+        # Project to 2D
+        points_2d = cluster_points[:, axes_to_keep]
+
+        # Order points along principal axis
+        if len(points_2d) >= 2:
+            pca = PCA(n_components=1)
+            pca.fit(points_2d)
+            center = points_2d.mean(axis=0)
+            direction = pca.components_[0]
+            projections = np.dot(points_2d - center, direction)
+            sorted_indices = np.argsort(projections)
+            polyline = points_2d[sorted_indices]
+        else:
+            polyline = points_2d
+
+        # Use original color from PLY
+        crack_polylines.append((cluster_id, polyline, np.array(color) / 255.0))
 
     logger.info(f"Generated {len(crack_polylines)} crack polylines")
 
