@@ -1389,11 +1389,14 @@ def measure_cluster(
     cluster_id = cluster['cluster_id']
     point_ids = cluster['point_ids']
 
-    # Get full point data
+    # Get full point data (exclude synthetic points)
     cluster_points = []
     for pid in point_ids:
         if pid in crack_points_lookup:
-            cluster_points.append(crack_points_lookup[pid])
+            point = crack_points_lookup[pid]
+            # Skip synthetic points - they don't have valid source/UV information
+            if not point.get('is_synthetic', False):
+                cluster_points.append(point)
 
     if not cluster_points:
         logger.warning(f"Cluster {cluster_id}: No points found")
