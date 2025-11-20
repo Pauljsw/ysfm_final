@@ -1295,9 +1295,23 @@ def measure_segment_2d(
 
                 # Generate visualization if requested
                 if viz_dir:
-                    crack_binary = detect_crack_pixels_in_mask(
-                        grayscale, binary_mask, detection_method, min_component_ratio
-                    )
+                    if detection_method.startswith('direct'):
+                        # For direct mode, create simple threshold binary for visualization
+                        # Get background intensity for threshold
+                        kernel = np.ones((5, 5), np.uint8)
+                        dilated = cv2.dilate(binary_mask.astype(np.uint8), kernel, iterations=2)
+                        edge_region = dilated - binary_mask.astype(np.uint8)
+                        edge_pixels = grayscale[edge_region > 0]
+                        if len(edge_pixels) > 0:
+                            bg_intensity = np.median(edge_pixels)
+                        else:
+                            bg_intensity = np.median(grayscale[binary_mask > 0])
+                        dark_thresh = bg_intensity * intensity_threshold
+                        crack_binary = ((grayscale < dark_thresh) & (binary_mask > 0)).astype(np.uint8) * 255
+                    else:
+                        crack_binary = detect_crack_pixels_in_mask(
+                            grayscale, binary_mask, detection_method, min_component_ratio
+                        )
                     viz_path = viz_dir / f"cluster_{cluster_id}_seg_{segment_id}.png"
                     visualize_measurement(
                         rgb_img, binary_mask, skeleton, crack_binary, scale_map,
