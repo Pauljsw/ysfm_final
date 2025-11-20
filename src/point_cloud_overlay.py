@@ -257,7 +257,8 @@ def overlay_masks_on_pointcloud(
                 source_masks.append({
                     'image_id': image_stem,
                     'mask_id': mask_id,
-                    'confidence': mask_confidence
+                    'confidence': mask_confidence,
+                    'uv': [float(pixel_xy[0]), float(pixel_xy[1])]  # 2D pixel coordinates
                 })
 
         # Decision based on voting

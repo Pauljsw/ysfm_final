@@ -21,6 +21,7 @@ Output:
 import json
 import logging
 import numpy as np
+import cv2
 from pathlib import Path
 from typing import Dict, List, Tuple, Optional
 from collections import defaultdict
@@ -408,15 +409,169 @@ def measure_width_along_normal(
     return positive_dist + negative_dist + 1
 
 
+def calculate_edge_based_width(
+    skeleton: np.ndarray,
+    grayscale: np.ndarray,
+    roi_mask: np.ndarray,
+    D: float,
+    sample_interval: int = 5,
+    canny_low: int = 50,
+    canny_high: int = 150
+) -> Tuple[float, float]:
+    """
+    Calculate crack width using edge detection on grayscale image.
+
+    This measures the actual crack boundaries based on intensity changes,
+    not the YOLO mask boundaries.
+
+    Args:
+        skeleton: Binary skeleton image
+        grayscale: Grayscale image (ROI region)
+        roi_mask: ROI mask to limit edge detection area
+        D: pixel_mm_ratio
+        sample_interval: Sample every N skeleton pixels
+        canny_low: Canny edge detection low threshold
+        canny_high: Canny edge detection high threshold
+
+    Returns:
+        (average_width_mm, max_width_mm)
+    """
+    # Find skeleton pixels
+    rows, cols = np.where(skeleton > 0)
+
+    if len(rows) < 3:
+        return 0.0, 0.0
+
+    # Apply edge detection within ROI
+    # Preprocess: enhance contrast
+    clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
+    enhanced = clahe.apply(grayscale)
+
+    # Apply ROI mask
+    enhanced_roi = cv2.bitwise_and(enhanced, enhanced, mask=roi_mask.astype(np.uint8))
+
+    # Edge detection
+    edges = cv2.Canny(enhanced_roi, canny_low, canny_high)
+
+    # Sample skeleton pixels
+    n_pixels = len(rows)
+    sample_indices = range(0, n_pixels, sample_interval)
+
+    widths = []
+
+    for idx in sample_indices:
+        r, c = rows[idx], cols[idx]
+
+        # Estimate local direction from nearby skeleton pixels
+        window = 3
+        nearby_rows = rows[max(0, idx-window):min(n_pixels, idx+window+1)]
+        nearby_cols = cols[max(0, idx-window):min(n_pixels, idx+window+1)]
+
+        if len(nearby_rows) < 2:
+            continue
+
+        # Fit line to get direction
+        dr = nearby_rows[-1] - nearby_rows[0]
+        dc = nearby_cols[-1] - nearby_cols[0]
+
+        # Perpendicular direction (normal)
+        length = np.sqrt(dr**2 + dc**2)
+        if length < 1e-6:
+            continue
+
+        nr, nc = -dc / length, dr / length
+
+        # Measure width along normal direction using edges
+        width_pixels = measure_edge_width_along_normal(
+            edges, r, c, nr, nc
+        )
+
+        if width_pixels > 0:
+            widths.append(width_pixels * D)
+
+    if not widths:
+        return 0.0, 0.0
+
+    return np.mean(widths), np.max(widths)
+
+
+def measure_edge_width_along_normal(
+    edges: np.ndarray,
+    r: int, c: int,
+    nr: float, nc: float,
+    max_distance: int = 100
+) -> int:
+    """
+    Measure crack width by finding edge pixels along normal direction.
+
+    Returns:
+        Width in pixels (distance between two edges)
+    """
+    height, width = edges.shape
+
+    # Search in both directions along normal for edge pixels
+    positive_edge = -1
+    negative_edge = -1
+
+    # Positive direction - find first edge
+    for d in range(1, max_distance):
+        new_r = int(round(r + d * nr))
+        new_c = int(round(c + d * nc))
+
+        if not (0 <= new_r < height and 0 <= new_c < width):
+            break
+
+        if edges[new_r, new_c] > 0:
+            positive_edge = d
+            break
+
+    # Negative direction - find first edge
+    for d in range(1, max_distance):
+        new_r = int(round(r - d * nr))
+        new_c = int(round(c - d * nc))
+
+        if not (0 <= new_r < height and 0 <= new_c < width):
+            break
+
+        if edges[new_r, new_c] > 0:
+            negative_edge = d
+            break
+
+    # Width = distance between two edges
+    if positive_edge > 0 and negative_edge > 0:
+        return positive_edge + negative_edge
+    elif positive_edge > 0:
+        return positive_edge * 2  # Estimate: double one side
+    elif negative_edge > 0:
+        return negative_edge * 2
+    else:
+        return 0
+
+
 def measure_segment_2d(
     masks_dir: Path,
     image_id: str,
     mask_id: int,
     pixel_mm_ratio: float,
-    image_shape: Tuple[int, int] = (2160, 3840)
+    segment_uvs: List[List[float]] = None,
+    image_shape: Tuple[int, int] = (2160, 3840),
+    margin: int = 50,
+    rgb_dir: Path = None,
+    use_edge_width: bool = True
 ) -> Dict:
     """
     Measure a segment using 2D skeleton method.
+
+    Args:
+        masks_dir: Path to YOLO masks
+        image_id: Image identifier
+        mask_id: Mask index
+        pixel_mm_ratio: mm per pixel
+        segment_uvs: List of [u, v] coordinates for this segment (for cropping)
+        image_shape: (height, width)
+        margin: Margin around bounding box for cropping
+        rgb_dir: Path to RGB images (for edge-based width measurement)
+        use_edge_width: Use edge detection for width measurement
 
     Returns:
         Dict with length_mm, avg_width_mm, max_width_mm
@@ -434,6 +589,27 @@ def measure_segment_2d(
     if binary_mask.sum() == 0:
         return {'length_mm': 0, 'avg_width_mm': 0, 'max_width_mm': 0}
 
+    # Crop mask to segment region if UV coordinates provided
+    if segment_uvs and len(segment_uvs) > 0:
+        uvs = np.array(segment_uvs)
+        u_coords = uvs[:, 0]
+        v_coords = uvs[:, 1]
+
+        # Calculate bounding box with margin
+        u_min = max(0, int(np.min(u_coords) - margin))
+        u_max = min(image_shape[1], int(np.max(u_coords) + margin))
+        v_min = max(0, int(np.min(v_coords) - margin))
+        v_max = min(image_shape[0], int(np.max(v_coords) + margin))
+
+        # Crop the mask to segment region
+        # Only keep mask pixels within the bounding box
+        cropped_mask = np.zeros_like(binary_mask)
+        cropped_mask[v_min:v_max, u_min:u_max] = binary_mask[v_min:v_max, u_min:u_max]
+        binary_mask = cropped_mask
+
+        if binary_mask.sum() == 0:
+            return {'length_mm': 0, 'avg_width_mm': 0, 'max_width_mm': 0}
+
     # Skeletonize
     skeleton = skeletonize(binary_mask > 0)
 
@@ -442,14 +618,43 @@ def measure_segment_2d(
     length_mm = calculate_skeleton_length(skeleton, D)
 
     # Calculate width
-    avg_width_mm, max_width_mm = calculate_skeleton_width(
-        skeleton, binary_mask, D
-    )
+    avg_width_mm, max_width_mm = 0.0, 0.0
+    width_method = 'mask'
+
+    # Try edge-based width measurement if RGB image available
+    if use_edge_width and rgb_dir:
+        # Load RGB image
+        rgb_path = None
+        for ext in ['.png', '.jpg', '.jpeg']:
+            candidate = rgb_dir / f"{image_id}{ext}"
+            if candidate.exists():
+                rgb_path = candidate
+                break
+
+        if rgb_path:
+            rgb_img = cv2.imread(str(rgb_path))
+            if rgb_img is not None:
+                # Convert to grayscale
+                grayscale = cv2.cvtColor(rgb_img, cv2.COLOR_BGR2GRAY)
+
+                # Use binary_mask as ROI
+                avg_width_mm, max_width_mm = calculate_edge_based_width(
+                    skeleton, grayscale, binary_mask, D
+                )
+                width_method = 'edge'
+
+    # Fallback to mask-based width if edge detection failed or not used
+    if avg_width_mm == 0.0 and max_width_mm == 0.0:
+        avg_width_mm, max_width_mm = calculate_skeleton_width(
+            skeleton, binary_mask, D
+        )
+        width_method = 'mask'
 
     return {
         'length_mm': round(length_mm, 2),
         'avg_width_mm': round(avg_width_mm, 2),
-        'max_width_mm': round(max_width_mm, 2)
+        'max_width_mm': round(max_width_mm, 2),
+        'width_method': width_method
     }
 
 
@@ -463,7 +668,9 @@ def measure_cluster(
     masks_dir: Path,
     pixel_mm_ratios: Dict[str, float],
     image_shape: Tuple[int, int],
-    n_segments: int = 5
+    n_segments: int = 5,
+    rgb_dir: Path = None,
+    use_edge_width: bool = True
 ) -> Dict:
     """
     Measure a single cluster.
@@ -475,6 +682,8 @@ def measure_cluster(
         pixel_mm_ratios: image_id -> pixel_mm_ratio
         image_shape: (height, width)
         n_segments: Number of segments
+        rgb_dir: Path to RGB images (for edge-based width)
+        use_edge_width: Use edge detection for width measurement
 
     Returns:
         Measurement dict
@@ -534,9 +743,19 @@ def measure_cluster(
             logger.warning(f"No pixel_mm_ratio for {image_id}")
             continue
 
-        # Measure in 2D
+        # Extract UV coordinates for this segment from points that belong to best_mask
+        segment_uvs = []
+        for point in segment['points']:
+            for source in point.get('source_masks', []):
+                if source['image_id'] == image_id and source['mask_id'] == mask_id:
+                    if 'uv' in source:
+                        segment_uvs.append(source['uv'])
+                    break
+
+        # Measure in 2D with segment cropping and edge-based width
         measurement = measure_segment_2d(
-            masks_dir, image_id, mask_id, D, image_shape
+            masks_dir, image_id, mask_id, D, segment_uvs, image_shape,
+            margin=50, rgb_dir=rgb_dir, use_edge_width=use_edge_width
         )
 
         measurement['segment_id'] = segment['segment_id']
@@ -578,7 +797,9 @@ def run_measurement(
     output_json: str,
     image_width: int = 3840,
     image_height: int = 2160,
-    n_segments: int = 5
+    n_segments: int = 5,
+    rgb_dir: str = None,
+    use_edge_width: bool = True
 ):
     """
     Run measurement on all clusters.
@@ -626,10 +847,15 @@ def run_measurement(
                 pixel_mm_ratios[clean_key] = value
 
     masks_path = Path(masks_dir)
+    rgb_path = Path(rgb_dir) if rgb_dir else None
     image_shape = (image_height, image_width)
 
     clusters = clusters_data.get('clusters', [])
     logger.info(f"Measuring {len(clusters)} clusters...")
+    if rgb_path and use_edge_width:
+        logger.info(f"Using edge-based width measurement with RGB from: {rgb_dir}")
+    else:
+        logger.info("Using mask-based width measurement")
 
     # Measure each cluster
     measurements = []
@@ -641,7 +867,9 @@ def run_measurement(
             masks_path,
             pixel_mm_ratios,
             image_shape,
-            n_segments
+            n_segments,
+            rgb_path,
+            use_edge_width
         )
         measurements.append(measurement)
 
@@ -698,6 +926,10 @@ if __name__ == '__main__':
     parser.add_argument('--image-height', type=int, default=2160)
     parser.add_argument('--n-segments', type=int, default=5,
                        help='Number of segments per cluster (default: 5)')
+    parser.add_argument('--rgb-dir', default=None,
+                       help='RGB images directory (for edge-based width measurement)')
+    parser.add_argument('--no-edge-width', action='store_true',
+                       help='Disable edge-based width measurement (use mask-based)')
     parser.add_argument('--log-level', default='INFO',
                        choices=['DEBUG', 'INFO', 'WARNING', 'ERROR'])
 
@@ -714,7 +946,9 @@ if __name__ == '__main__':
             args.output,
             args.image_width,
             args.image_height,
-            args.n_segments
+            args.n_segments,
+            args.rgb_dir,
+            not args.no_edge_width
         )
 
         if measurements:
