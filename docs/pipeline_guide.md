@@ -33,10 +33,7 @@ RGB 이미지들로부터 3D 장면 복원 및 카메라 포즈 추정
 
 ### 실행 명령
 ```bash
-# COLMAP 사용 예시
-colmap automatic_reconstructor \
-    --workspace_path data/sfm \
-    --image_path data/rgb
+python -m src.pipeline sfm --config configs/simple.yaml
 ```
 
 ### 왜 필요한가?
@@ -68,11 +65,7 @@ RGB 이미지에서 균열 영역을 세그멘테이션
 
 ### 실행 명령
 ```bash
-# YOLOv8/v11 추론 예시
-python yolo_inference.py \
-    --model weights/crack_seg.pt \
-    --source data/rgb \
-    --output data/yolo_masks
+python -m src.pipeline infer --config configs/simple.yaml
 ```
 
 ### 왜 필요한가?
@@ -302,11 +295,11 @@ python -m src.measure_clusters \
 ## Quick Start
 
 ```bash
-# Phase 0: SfM (COLMAP 사용)
-# ... (별도 실행)
+# Phase 0: SfM
+python -m src.pipeline sfm --config configs/simple.yaml
 
 # Phase 1: YOLO inference
-# ... (별도 실행)
+python -m src.pipeline infer --config configs/simple.yaml
 
 # Phase 2: D2C + Scale Maps
 python -m src.d2c_and_pixel_scale \
