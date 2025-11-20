@@ -216,7 +216,7 @@ def segment_cluster_3d(
     # Project points onto principal axis
     projections = np.dot(xyz - centroid, principal_dir)
 
-    # Determine segment boundaries
+    # Determine segment count
     min_proj, max_proj = projections.min(), projections.max()
 
     if adaptive and len(cluster_points) > 20:
@@ -225,28 +225,35 @@ def segment_cluster_3d(
         # Roughly one segment per 0.05m (5cm)
         n_segments = max(2, min(10, int(extent / 0.05) + 1))
 
-    # Create segment boundaries
-    boundaries = np.linspace(min_proj, max_proj, n_segments + 1)
+    # Point-based segmentation: divide by point count, not distance
+    # Sort points by projection value to maintain spatial continuity
+    sorted_indices = np.argsort(projections)
+
+    # Calculate points per segment
+    n_points = len(cluster_points)
+    points_per_seg = n_points // n_segments
+    remainder = n_points % n_segments
 
     # Assign points to segments
     segments = []
+    start_idx = 0
+
     for i in range(n_segments):
-        low, high = boundaries[i], boundaries[i + 1]
+        # Distribute remainder points to first segments
+        seg_size = points_per_seg + (1 if i < remainder else 0)
+        end_idx = start_idx + seg_size
 
-        # Include boundary points in segment
-        if i == n_segments - 1:
-            mask = (projections >= low) & (projections <= high)
-        else:
-            mask = (projections >= low) & (projections < high)
+        if seg_size > 0:
+            seg_indices = sorted_indices[start_idx:end_idx]
+            segment_points = [cluster_points[idx] for idx in seg_indices]
 
-        segment_points = [p for p, m in zip(cluster_points, mask) if m]
-
-        if segment_points:
             segments.append({
                 'segment_id': i,
                 'point_ids': [p['point_id'] for p in segment_points],
                 'points': segment_points
             })
+
+        start_idx = end_idx
 
     return segments
 
