@@ -180,9 +180,21 @@ def load_mask_polygon(
             with open(json_path) as f:
                 masks_data = json.load(f)
 
-            if mask_id < len(masks_data):
-                mask = masks_data[mask_id]
-                return mask.get('polygon', [])
+            # Handle both list and dict formats
+            if isinstance(masks_data, list):
+                if mask_id < len(masks_data):
+                    mask = masks_data[mask_id]
+                    return mask.get('polygon', [])
+            elif isinstance(masks_data, dict):
+                # Try string key
+                str_key = str(mask_id)
+                if str_key in masks_data:
+                    mask = masks_data[str_key]
+                    return mask.get('polygon', [])
+                # Try integer key (if dict has int keys)
+                if mask_id in masks_data:
+                    mask = masks_data[mask_id]
+                    return mask.get('polygon', [])
 
     return None
 
