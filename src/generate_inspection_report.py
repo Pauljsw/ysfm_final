@@ -604,6 +604,8 @@ def main():
     )
     parser.add_argument('--ply', type=str, required=True,
                         help='Path to clustered_cracks.ply')
+    parser.add_argument('--crack-points', type=str, required=True,
+                        help='Path to crack_points.json (to filter synthetic points)')
     parser.add_argument('--measurements', type=str, required=True,
                         help='Path to cluster measurements JSON')
     parser.add_argument('--output-dir', type=str, default='outputs',
@@ -634,6 +636,35 @@ def main():
     # Load clustered cracks PLY
     logger.info(f"Loading clustered cracks: {args.ply}")
     points, colors = load_ply_with_colors(Path(args.ply))
+
+    # Load crack_points.json to identify synthetic points
+    logger.info(f"Loading crack points: {args.crack_points}")
+    crack_points_lookup = load_crack_points(Path(args.crack_points))
+
+    # Build set of original (non-synthetic) point coordinates
+    original_xyz_set = set()
+    for pid, point_data in crack_points_lookup.items():
+        if not point_data.get('is_synthetic', False):
+            xyz = point_data.get('xyz')
+            if xyz:
+                # Round to avoid float precision issues
+                key = (round(xyz[0], 6), round(xyz[1], 6), round(xyz[2], 6))
+                original_xyz_set.add(key)
+
+    logger.info(f"Original (non-synthetic) points: {len(original_xyz_set)}")
+
+    # Filter PLY points to only include original points
+    filtered_points = []
+    filtered_colors = []
+    for point, color in zip(points, colors):
+        key = (round(point[0], 6), round(point[1], 6), round(point[2], 6))
+        if key in original_xyz_set:
+            filtered_points.append(point)
+            filtered_colors.append(color)
+
+    points = np.array(filtered_points) if filtered_points else np.array([])
+    colors = np.array(filtered_colors) if filtered_colors else np.array([])
+    logger.info(f"After filtering synthetic: {len(points)} points")
 
     # Group by color to identify clusters
     cluster_groups = group_points_by_color(points, colors)
