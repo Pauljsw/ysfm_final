@@ -616,6 +616,10 @@ def main():
                         help='Output table filename')
     parser.add_argument('--drop-axis', type=int, default=2, choices=[0, 1, 2],
                         help='Axis to drop for 2D projection (0=X, 1=Y, 2=Z). Default: 2 (front view)')
+    parser.add_argument('--flip-x', action='store_true',
+                        help='Flip X axis (horizontal mirror)')
+    parser.add_argument('--flip-y', action='store_true',
+                        help='Flip Y axis (vertical mirror)')
     parser.add_argument('--log-level', type=str, default='INFO',
                         choices=['DEBUG', 'INFO', 'WARNING', 'ERROR'],
                         help='Logging level')
@@ -692,6 +696,12 @@ def main():
             polyline = points_2d[sorted_indices]
         else:
             polyline = points_2d
+
+        # Apply flip transformations
+        if args.flip_x:
+            polyline[:, 0] = -polyline[:, 0]
+        if args.flip_y:
+            polyline[:, 1] = -polyline[:, 1]
 
         # Use original color from PLY
         crack_polylines.append((cluster_id, polyline, np.array(color) / 255.0))
