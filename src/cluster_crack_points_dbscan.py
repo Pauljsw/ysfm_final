@@ -133,6 +133,252 @@ def angle_between_axes(axis1: np.ndarray, axis2: np.ndarray) -> float:
     return np.degrees(np.arccos(cos_angle))
 
 
+def split_cluster_by_direction(
+    cluster: Dict,
+    crack_points: List[Dict],
+    split_angle_threshold: float = 45.0,
+    min_points_for_split: int = 5
+) -> List[Dict]:
+    """
+    Split a single cluster if it contains points with significantly different directions.
+
+    Uses local direction analysis to identify distinct directional sub-groups.
+
+    Args:
+        cluster: Single cluster dict
+        crack_points: Original crack points list
+        split_angle_threshold: Angle difference to consider splitting (degrees)
+        min_points_for_split: Minimum points required for a sub-cluster
+
+    Returns:
+        List of clusters (1 if no split, multiple if split occurred)
+    """
+    point_ids = cluster['point_ids']
+
+    if len(point_ids) < min_points_for_split * 2:
+        return [cluster]
+
+    # Build point lookup
+    point_lookup = {p['point_id']: p for p in crack_points}
+    points_xyz = np.array([point_lookup[pid]['xyz'] for pid in point_ids if pid in point_lookup])
+    valid_point_ids = [pid for pid in point_ids if pid in point_lookup]
+
+    if len(points_xyz) < min_points_for_split * 2:
+        return [cluster]
+
+    # Compute local tangent direction for each point using k nearest neighbors
+    from sklearn.neighbors import NearestNeighbors
+
+    k = min(7, len(points_xyz) - 1)
+    if k < 3:
+        return [cluster]
+
+    nbrs = NearestNeighbors(n_neighbors=k + 1).fit(points_xyz)
+    _, indices = nbrs.kneighbors(points_xyz)
+
+    # Compute local direction for each point
+    local_directions = []
+    for i, neighbors in enumerate(indices):
+        neighbor_points = points_xyz[neighbors]
+
+        # PCA on local neighborhood
+        centroid = np.mean(neighbor_points, axis=0)
+        centered = neighbor_points - centroid
+
+        try:
+            _, _, Vt = np.linalg.svd(centered, full_matrices=False)
+            direction = Vt[0]  # Principal direction
+            # Ensure consistent direction (positive x component)
+            if direction[0] < 0:
+                direction = -direction
+            local_directions.append(direction)
+        except:
+            local_directions.append(np.array([1.0, 0.0, 0.0]))
+
+    local_directions = np.array(local_directions)
+
+    # Use agglomerative clustering on directions
+    from sklearn.cluster import AgglomerativeClustering
+
+    # Convert directions to angle-based distance matrix
+    # Use cosine similarity (absolute value since direction can be flipped)
+    n_points = len(local_directions)
+
+    # Try to find 2-3 directional groups
+    best_split = None
+    best_score = 0
+
+    for n_dir_clusters in [2, 3]:
+        if n_points < n_dir_clusters * min_points_for_split:
+            continue
+
+        try:
+            dir_clustering = AgglomerativeClustering(
+                n_clusters=n_dir_clusters,
+                metric='cosine',
+                linkage='average'
+            ).fit(local_directions)
+
+            dir_labels = dir_clustering.labels_
+
+            # Check if sub-clusters have different directions
+            sub_axes = []
+            sub_counts = []
+            valid_split = True
+
+            for label in range(n_dir_clusters):
+                mask = dir_labels == label
+                count = np.sum(mask)
+
+                if count < min_points_for_split:
+                    valid_split = False
+                    break
+
+                sub_points = points_xyz[mask]
+                sub_axis = compute_principal_axis(sub_points)
+                sub_axes.append(sub_axis)
+                sub_counts.append(count)
+
+            if not valid_split:
+                continue
+
+            # Check angle between sub-cluster axes
+            max_angle = 0
+            for i in range(len(sub_axes)):
+                for j in range(i + 1, len(sub_axes)):
+                    angle = angle_between_axes(sub_axes[i], sub_axes[j])
+                    max_angle = max(max_angle, angle)
+
+            # Only split if angle difference is significant
+            if max_angle >= split_angle_threshold:
+                # Score based on angle difference and balance
+                balance = min(sub_counts) / max(sub_counts)
+                score = max_angle * balance
+
+                if score > best_score:
+                    best_score = score
+                    best_split = (dir_labels, n_dir_clusters, max_angle)
+
+        except Exception as e:
+            continue
+
+    if best_split is None:
+        return [cluster]
+
+    dir_labels, n_dir_clusters, split_angle = best_split
+    logger.debug(f"  Splitting cluster {cluster['cluster_id']}: {n_dir_clusters} sub-clusters, angle={split_angle:.1f}°")
+
+    # Create sub-clusters
+    sub_clusters = []
+    for label in range(n_dir_clusters):
+        mask = dir_labels == label
+        sub_point_ids = [valid_point_ids[i] for i in range(len(valid_point_ids)) if mask[i]]
+        sub_xyz = points_xyz[mask]
+
+        if len(sub_point_ids) < min_points_for_split:
+            continue
+
+        # Get sub-cluster points
+        sub_points = [point_lookup[pid] for pid in sub_point_ids if pid in point_lookup]
+
+        # Aggregate source masks
+        source_masks_map = defaultdict(lambda: {'n_points': 0, 'confidence_sum': 0.0})
+
+        for point in sub_points:
+            if point.get('is_synthetic', False):
+                continue
+            sources = point.get('sources', point.get('source_masks', []))
+            for source in sources:
+                key = (source['image_id'], source['mask_id'])
+                source_masks_map[key]['n_points'] += 1
+                source_masks_map[key]['confidence_sum'] += source.get('confidence', 1.0)
+
+        source_masks = []
+        for (image_id, mask_id), info in source_masks_map.items():
+            source_masks.append({
+                'image_id': image_id,
+                'mask_id': mask_id,
+                'n_points': info['n_points'],
+                'avg_confidence': info['confidence_sum'] / info['n_points'] if info['n_points'] > 0 else 1.0
+            })
+        source_masks.sort(key=lambda x: x['n_points'], reverse=True)
+
+        # Compute properties
+        centroid = np.mean(sub_xyz, axis=0)
+        bbox_min = np.min(sub_xyz, axis=0)
+        bbox_max = np.max(sub_xyz, axis=0)
+        principal_axis = compute_principal_axis(sub_xyz)
+
+        # Confidence
+        confidences = []
+        for p in sub_points:
+            if not p.get('is_synthetic', False):
+                conf = p.get('avg_confidence', None)
+                if conf is None:
+                    sources = p.get('sources', p.get('source_masks', []))
+                    if sources:
+                        conf = np.mean([s.get('confidence', 1.0) for s in sources])
+                if conf is not None:
+                    confidences.append(conf)
+        avg_confidence = np.mean(confidences) if confidences else 1.0
+
+        sub_cluster = {
+            'cluster_id': cluster['cluster_id'],  # Will be reassigned later
+            'n_points': len(sub_point_ids),
+            'point_ids': sub_point_ids,
+            'centroid_3d': centroid.tolist(),
+            'bbox_3d': {
+                'min': bbox_min.tolist(),
+                'max': bbox_max.tolist()
+            },
+            'principal_axis': principal_axis.tolist(),
+            'source_masks': source_masks,
+            'n_source_masks': len(source_masks),
+            'n_views': len(set(s['image_id'] for s in source_masks)),
+            'avg_confidence': float(avg_confidence),
+            'split_from': cluster['cluster_id']
+        }
+        sub_clusters.append(sub_cluster)
+
+    return sub_clusters if sub_clusters else [cluster]
+
+
+def split_clusters_by_direction(
+    clusters: List[Dict],
+    crack_points: List[Dict],
+    split_angle_threshold: float = 45.0,
+    min_points_for_split: int = 5
+) -> List[Dict]:
+    """
+    Stage 1.5: Split clusters containing multiple crack directions.
+
+    Args:
+        clusters: List of cluster dicts from DBSCAN
+        crack_points: Original crack points list
+        split_angle_threshold: Angle difference to consider splitting (degrees)
+        min_points_for_split: Minimum points required for a sub-cluster
+
+    Returns:
+        List of clusters after splitting
+    """
+    split_clusters = []
+    n_splits = 0
+
+    for cluster in clusters:
+        result = split_cluster_by_direction(
+            cluster, crack_points, split_angle_threshold, min_points_for_split
+        )
+        split_clusters.extend(result)
+
+        if len(result) > 1:
+            n_splits += 1
+
+    if n_splits > 0:
+        logger.info(f"  Split {n_splits} clusters by direction")
+
+    return split_clusters
+
+
 def merge_clusters_by_direction(
     clusters: List[Dict],
     crack_points: List[Dict],
@@ -288,12 +534,15 @@ def run_dbscan_clustering(
     show_noise: bool = False,
     merge_distance: float = 0.1,
     merge_angle: float = 30.0,
-    no_merge: bool = False
+    no_merge: bool = False,
+    split_angle: float = 45.0,
+    no_split: bool = False
 ):
     """
-    Run DBSCAN clustering on crack points with direction-aware merging.
+    Run DBSCAN clustering on crack points with direction-aware splitting and merging.
 
     Stage 1: DBSCAN clustering
+    Stage 1.5: Split clusters by direction (if not disabled)
     Stage 2: Merge clusters with similar principal axis (if not disabled)
 
     Args:
@@ -306,6 +555,8 @@ def run_dbscan_clustering(
         merge_distance: Max centroid distance to consider merging (meters)
         merge_angle: Max angle difference to merge clusters (degrees)
         no_merge: Disable direction-aware merging (Stage 2)
+        split_angle: Angle threshold for splitting clusters by direction (degrees)
+        no_split: Disable direction-aware splitting (Stage 1.5)
     """
     logger.info("=" * 80)
     logger.info("DBSCAN Clustering for Crack Points")
@@ -429,6 +680,14 @@ def run_dbscan_clustering(
         logger.debug(f"  Cluster {cluster_id}: {len(cluster_points)} points, "
                      f"{len(source_masks)} source masks, {cluster_entry['n_views']} views")
 
+    # Stage 1.5: Direction-aware splitting
+    if not no_split and len(clusters) > 0:
+        logger.info(f"Stage 1.5: Direction-aware splitting (angle={split_angle}°)...")
+        clusters = split_clusters_by_direction(
+            clusters, crack_points, split_angle
+        )
+        n_clusters = len(clusters)
+
     # Stage 2: Direction-aware merging
     if not no_merge and len(clusters) > 1:
         logger.info(f"Stage 2: Direction-aware merging (distance={merge_distance}m, angle={merge_angle}°)...")
@@ -468,6 +727,8 @@ def run_dbscan_clustering(
             'noise_points': n_noise,
             'dbscan_eps': eps,
             'dbscan_min_samples': min_samples,
+            'split_enabled': not no_split,
+            'split_angle': split_angle,
             'merge_enabled': not no_merge,
             'merge_distance': merge_distance,
             'merge_angle': merge_angle,
@@ -558,6 +819,10 @@ if __name__ == '__main__':
                        help='Max angle difference for merging clusters (degrees, default: 30)')
     parser.add_argument('--no-merge', action='store_true',
                        help='Disable direction-aware merging (Stage 2)')
+    parser.add_argument('--split-angle', type=float, default=45.0,
+                       help='Angle threshold for splitting clusters by direction (degrees, default: 45)')
+    parser.add_argument('--no-split', action='store_true',
+                       help='Disable direction-aware splitting (Stage 1.5)')
     parser.add_argument('--log-level', default='INFO',
                        choices=['DEBUG', 'INFO', 'WARNING', 'ERROR'])
 
@@ -575,7 +840,9 @@ if __name__ == '__main__':
             args.show_noise,
             args.merge_distance,
             args.merge_angle,
-            args.no_merge
+            args.no_merge,
+            args.split_angle,
+            args.no_split
         )
 
         if clusters:
