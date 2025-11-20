@@ -322,8 +322,29 @@ def load_crack_points(crack_points_path: Path) -> Dict[int, Dict]:
     with open(crack_points_path, 'r') as f:
         data = json.load(f)
 
-    points = data.get('crack_points', data) if isinstance(data, dict) else data
-    return {p['point_id']: p for p in points}
+    # Handle different JSON structures
+    if isinstance(data, dict):
+        if 'crack_points' in data:
+            points = data['crack_points']
+        elif 'points' in data:
+            points = data['points']
+        else:
+            # Assume the dict values are the points
+            points = list(data.values()) if all(isinstance(v, dict) for v in data.values()) else []
+    elif isinstance(data, list):
+        points = data
+    else:
+        logger.error(f"Unexpected crack_points format: {type(data)}")
+        return {}
+
+    # Build lookup
+    lookup = {}
+    for p in points:
+        if isinstance(p, dict) and 'point_id' in p:
+            lookup[p['point_id']] = p
+
+    logger.info(f"Loaded {len(lookup)} crack points")
+    return lookup
 
 
 def load_measurements(measurements_path: Path) -> Dict[int, Dict]:
