@@ -538,6 +538,148 @@ def measure_width_along_normal(
     return positive_dist + negative_dist + 1
 
 
+def detect_crack_pixels_in_mask(
+    grayscale: np.ndarray,
+    mask: np.ndarray,
+    method: str = 'adaptive'
+) -> np.ndarray:
+    """
+    Detect actual crack pixels within YOLO mask region using intensity.
+
+    Cracks are dark pixels - this finds them within the mask candidate region.
+
+    Args:
+        grayscale: Grayscale image
+        mask: YOLO mask (candidate region)
+        method: 'adaptive', 'otsu', or 'percentile'
+
+    Returns:
+        Binary image where 1 = actual crack pixel, 0 = background
+    """
+    # Apply mask to get ROI
+    masked_gray = grayscale.copy()
+    masked_gray[mask == 0] = 255  # Set non-mask areas to white
+
+    if method == 'otsu':
+        # Otsu's method - good for bimodal distribution
+        mask_pixels = grayscale[mask > 0]
+        if len(mask_pixels) == 0:
+            return np.zeros_like(mask)
+
+        threshold, _ = cv2.threshold(
+            mask_pixels, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU
+        )
+        crack_binary = (grayscale < threshold).astype(np.uint8) * 255
+
+    elif method == 'adaptive':
+        # Adaptive thresholding - handles varying illumination
+        crack_binary = cv2.adaptiveThreshold(
+            masked_gray, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
+            cv2.THRESH_BINARY_INV, 21, 10
+        )
+
+    elif method == 'percentile':
+        # Use darkest percentile within mask as crack
+        mask_pixels = grayscale[mask > 0]
+        if len(mask_pixels) == 0:
+            return np.zeros_like(mask)
+
+        # Cracks are typically in the darkest 20-30% of mask pixels
+        threshold = np.percentile(mask_pixels, 30)
+        crack_binary = (grayscale < threshold).astype(np.uint8) * 255
+    else:
+        raise ValueError(f"Unknown method: {method}")
+
+    # Apply original mask to limit to ROI
+    crack_binary = cv2.bitwise_and(crack_binary, crack_binary, mask=mask.astype(np.uint8))
+
+    # Morphological cleanup - remove noise
+    kernel = np.ones((2, 2), np.uint8)
+    crack_binary = cv2.morphologyEx(crack_binary, cv2.MORPH_OPEN, kernel)
+
+    return crack_binary
+
+
+def calculate_intensity_based_width(
+    skeleton: np.ndarray,
+    grayscale: np.ndarray,
+    mask: np.ndarray,
+    scale_map: np.ndarray,
+    sample_interval: int = 5,
+    detection_method: str = 'percentile'
+) -> Tuple[float, float]:
+    """
+    Calculate crack width by detecting actual dark crack pixels within mask.
+
+    This gives true crack width in pixels, not mask width.
+
+    Args:
+        skeleton: Binary skeleton image
+        grayscale: Grayscale image
+        mask: YOLO mask (candidate region)
+        scale_map: Per-pixel mm/px scale map
+        sample_interval: Sample every N skeleton pixels
+        detection_method: Method for crack pixel detection
+
+    Returns:
+        (average_width_mm, max_width_mm)
+    """
+    # Detect actual crack pixels within mask
+    crack_binary = detect_crack_pixels_in_mask(grayscale, mask, detection_method)
+
+    # Find skeleton pixels
+    rows, cols = np.where(skeleton > 0)
+
+    if len(rows) < 3:
+        return 0.0, 0.0
+
+    # Sample skeleton pixels
+    n_pixels = len(rows)
+    sample_indices = range(0, n_pixels, sample_interval)
+
+    widths = []
+
+    for idx in sample_indices:
+        r, c = rows[idx], cols[idx]
+
+        # Get scale at this pixel with fallback
+        D = get_scale_with_fallback(scale_map, r, c)
+        if D == 0:
+            continue
+
+        # Estimate local direction from nearby skeleton pixels
+        window = 3
+        nearby_rows = rows[max(0, idx-window):min(n_pixels, idx+window+1)]
+        nearby_cols = cols[max(0, idx-window):min(n_pixels, idx+window+1)]
+
+        if len(nearby_rows) < 2:
+            continue
+
+        # Fit line to get direction
+        dr = nearby_rows[-1] - nearby_rows[0]
+        dc = nearby_cols[-1] - nearby_cols[0]
+
+        # Perpendicular direction (normal)
+        length = np.sqrt(dr**2 + dc**2)
+        if length < 1e-6:
+            continue
+
+        nr, nc = -dc / length, dr / length
+
+        # Measure width along normal using detected crack pixels
+        width_pixels = measure_width_along_normal(
+            crack_binary, r, c, nr, nc, max_distance=50
+        )
+
+        if width_pixels > 0:
+            widths.append(width_pixels * D)
+
+    if not widths:
+        return 0.0, 0.0
+
+    return np.mean(widths), np.max(widths)
+
+
 def calculate_edge_based_width(
     skeleton: np.ndarray,
     grayscale: np.ndarray,
@@ -754,7 +896,7 @@ def measure_segment_2d(
     avg_width_mm, max_width_mm = 0.0, 0.0
     width_method = 'mask'
 
-    # Try edge-based width measurement if RGB image available
+    # Try intensity-based width measurement if RGB image available
     if use_edge_width and rgb_dir:
         # Load RGB image
         rgb_path = None
@@ -770,13 +912,15 @@ def measure_segment_2d(
                 # Convert to grayscale
                 grayscale = cv2.cvtColor(rgb_img, cv2.COLOR_BGR2GRAY)
 
-                # Use binary_mask as ROI
-                avg_width_mm, max_width_mm = calculate_edge_based_width(
-                    skeleton, grayscale, binary_mask, scale_map
+                # Use intensity-based crack detection within mask
+                # This measures actual dark crack pixels, not mask boundary
+                avg_width_mm, max_width_mm = calculate_intensity_based_width(
+                    skeleton, grayscale, binary_mask, scale_map,
+                    sample_interval=5, detection_method='percentile'
                 )
-                width_method = 'edge'
+                width_method = 'intensity'
 
-    # Fallback to mask-based width if edge detection failed or not used
+    # Fallback to mask-based width if intensity detection failed or not used
     if avg_width_mm == 0.0 and max_width_mm == 0.0:
         avg_width_mm, max_width_mm = calculate_skeleton_width(
             skeleton, binary_mask, scale_map
