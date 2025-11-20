@@ -347,17 +347,22 @@ def run_dbscan_clustering(
         # Get point data
         cluster_points = [crack_points[i] for i in cluster_indices]
 
-        # Aggregate source masks
+        # Aggregate source masks (skip synthetic points)
         source_masks_map = defaultdict(lambda: {
             'n_points': 0,
             'confidence_sum': 0.0
         })
 
         for point in cluster_points:
-            for source in point['source_masks']:
+            # Skip synthetic points - they don't have source information
+            if point.get('is_synthetic', False):
+                continue
+            # Handle both 'sources' and 'source_masks' field names
+            sources = point.get('sources', point.get('source_masks', []))
+            for source in sources:
                 key = (source['image_id'], source['mask_id'])
                 source_masks_map[key]['n_points'] += 1
-                source_masks_map[key]['confidence_sum'] += source['confidence']
+                source_masks_map[key]['confidence_sum'] += source.get('confidence', 1.0)
 
         # Convert to list
         source_masks = []
@@ -378,8 +383,19 @@ def run_dbscan_clustering(
         bbox_max = np.max(cluster_xyz, axis=0)
         principal_axis = compute_principal_axis(cluster_xyz)
 
-        # Average confidence
-        avg_confidence = np.mean([p['avg_confidence'] for p in cluster_points])
+        # Average confidence (only from original points with confidence info)
+        confidences = []
+        for p in cluster_points:
+            if not p.get('is_synthetic', False):
+                conf = p.get('avg_confidence', None)
+                if conf is None:
+                    # Try to get confidence from sources
+                    sources = p.get('sources', p.get('source_masks', []))
+                    if sources:
+                        conf = np.mean([s.get('confidence', 1.0) for s in sources])
+                if conf is not None:
+                    confidences.append(conf)
+        avg_confidence = np.mean(confidences) if confidences else 1.0
 
         # Create cluster entry
         cluster_entry = {
