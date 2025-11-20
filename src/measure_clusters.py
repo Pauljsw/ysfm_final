@@ -507,9 +507,16 @@ def measure_cluster(
         image_id, mask_id = best_mask
 
         # Get pixel_mm_ratio for this image
-        # Try different key formats
+        # Try different key formats (handle camera_RGB_ prefix)
         D = None
-        for key in [image_id, f"{image_id}.png", image_id.replace('.png', '')]:
+        # Extract timestamp part from image_id (e.g., camera_RGB_1761702052_213355008 -> 1761702052_213355008)
+        timestamp_key = image_id
+        for prefix in ['camera_RGB_', 'camera_DPT_']:
+            if image_id.startswith(prefix):
+                timestamp_key = image_id[len(prefix):]
+                break
+
+        for key in [image_id, timestamp_key, f"{image_id}.png", image_id.replace('.png', '')]:
             if key in pixel_mm_ratios:
                 D = pixel_mm_ratios[key]
                 break
