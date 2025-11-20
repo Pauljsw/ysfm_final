@@ -240,9 +240,19 @@ def merge_clusters_by_direction(
                 })
             source_masks.sort(key=lambda x: x['n_points'], reverse=True)
 
-            # Compute average confidence
+            # Compute average confidence (handle missing field and synthetic points)
             merged_points = [point_lookup[pid] for pid in merged_point_ids if pid in point_lookup]
-            avg_confidence = np.mean([p['avg_confidence'] for p in merged_points])
+            confidences = []
+            for p in merged_points:
+                if not p.get('is_synthetic', False):
+                    conf = p.get('avg_confidence', None)
+                    if conf is None:
+                        sources = p.get('sources', p.get('source_masks', []))
+                        if sources:
+                            conf = np.mean([s.get('confidence', 1.0) for s in sources])
+                    if conf is not None:
+                        confidences.append(conf)
+            avg_confidence = np.mean(confidences) if confidences else 1.0
 
             merged_cluster = {
                 'cluster_id': root,  # Will be reassigned later
