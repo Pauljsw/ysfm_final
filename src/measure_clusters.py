@@ -104,6 +104,49 @@ def setup_logging(level: str = 'INFO'):
     )
 
 
+def get_scale_with_fallback(
+    scale_map: np.ndarray,
+    r: int,
+    c: int,
+    search_radius: int = 20
+) -> float:
+    """
+    Get scale value at (r, c) with fallback to nearby valid pixels.
+
+    If scale_map[r, c] is 0 or invalid, search in expanding squares
+    for nearby valid scale values and return their mean.
+    """
+    H, W = scale_map.shape
+
+    # First try direct value
+    if 0 <= r < H and 0 <= c < W:
+        val = scale_map[r, c]
+        if val > 0:
+            return float(val)
+
+    # Search in expanding squares for valid neighbors
+    for radius in range(1, search_radius + 1):
+        valid_values = []
+
+        # Check pixels at this radius (square boundary)
+        for dr in range(-radius, radius + 1):
+            for dc in range(-radius, radius + 1):
+                # Only check boundary pixels of the square
+                if abs(dr) != radius and abs(dc) != radius:
+                    continue
+
+                nr, nc = r + dr, c + dc
+                if 0 <= nr < H and 0 <= nc < W:
+                    val = scale_map[nr, nc]
+                    if val > 0:
+                        valid_values.append(val)
+
+        if valid_values:
+            return float(np.mean(valid_values))
+
+    return 0.0
+
+
 # =============================================================================
 # 3D Functions: Cluster Segmentation
 # =============================================================================
@@ -324,8 +367,8 @@ def calculate_skeleton_length(
     visited_edges = set()
 
     for r, c in skeleton_pixels:
-        # Get scale at this pixel
-        D = scale_map[r, c] if scale_map[r, c] > 0 else 0.0
+        # Get scale at this pixel with fallback to nearby valid pixels
+        D = get_scale_with_fallback(scale_map, r, c)
 
         if D == 0:
             continue
@@ -350,8 +393,10 @@ def calculate_skeleton_length(
                 if edge not in visited_edges:
                     visited_edges.add(edge)
 
-                    # Use average scale of the two pixels
-                    D_neighbor = scale_map[nr, nc] if scale_map[nr, nc] > 0 else D
+                    # Use average scale of the two pixels (with fallback)
+                    D_neighbor = get_scale_with_fallback(scale_map, nr, nc)
+                    if D_neighbor == 0:
+                        D_neighbor = D
                     D_avg = (D + D_neighbor) / 2.0
 
                     # Determine distance based on direction
@@ -396,8 +441,8 @@ def calculate_skeleton_width(
     for idx in sample_indices:
         r, c = rows[idx], cols[idx]
 
-        # Get scale at this pixel
-        D = scale_map[r, c] if scale_map[r, c] > 0 else 0.0
+        # Get scale at this pixel with fallback
+        D = get_scale_with_fallback(scale_map, r, c)
         if D == 0:
             continue
 
@@ -536,8 +581,8 @@ def calculate_edge_based_width(
     for idx in sample_indices:
         r, c = rows[idx], cols[idx]
 
-        # Get scale at this pixel
-        D = scale_map[r, c] if scale_map[r, c] > 0 else 0.0
+        # Get scale at this pixel with fallback
+        D = get_scale_with_fallback(scale_map, r, c)
         if D == 0:
             continue
 
