@@ -1411,6 +1411,7 @@ def measure_cluster(
 
     # Segment cluster in 3D
     segments = segment_cluster_3d(cluster_points, n_segments)
+    logger.info(f"Cluster {cluster_id}: Created {len(segments)} segments (requested {n_segments})")
 
     # Measure each segment in 2D
     segment_measurements = []
