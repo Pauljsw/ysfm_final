@@ -32,6 +32,71 @@ from skimage.draw import polygon as draw_polygon
 logger = logging.getLogger(__name__)
 
 
+def generate_cluster_colors(n_clusters: int) -> List[Tuple[int, int, int]]:
+    """
+    Generate distinct colors for clusters using HSV color space.
+    Must match cluster_crack_points_dbscan.py for consistency.
+    """
+    if n_clusters == 0:
+        return []
+
+    colors = []
+    for i in range(n_clusters):
+        hue = i / n_clusters
+        h = hue * 6
+        c = 1.0
+        x = 1 - abs(h % 2 - 1)
+
+        if h < 1:
+            r, g, b = c, x, 0
+        elif h < 2:
+            r, g, b = x, c, 0
+        elif h < 3:
+            r, g, b = 0, c, x
+        elif h < 4:
+            r, g, b = 0, x, c
+        elif h < 5:
+            r, g, b = x, 0, c
+        else:
+            r, g, b = c, 0, x
+
+        colors.append((int(r * 255), int(g * 255), int(b * 255)))
+
+    return colors
+
+
+def rgb_to_color_name(rgb: Tuple[int, int, int]) -> str:
+    """
+    Convert RGB to approximate color name for user convenience.
+    """
+    r, g, b = rgb
+
+    # Simple hue-based naming
+    if r >= 200 and g < 100 and b < 100:
+        return "Red"
+    elif r >= 200 and g >= 200 and b < 100:
+        return "Yellow"
+    elif r < 100 and g >= 200 and b < 100:
+        return "Green"
+    elif r < 100 and g >= 200 and b >= 200:
+        return "Cyan"
+    elif r < 100 and g < 100 and b >= 200:
+        return "Blue"
+    elif r >= 200 and g < 100 and b >= 200:
+        return "Magenta"
+    elif r >= 200 and g >= 100 and b < 100:
+        return "Orange"
+    elif r >= 100 and g < 100 and b >= 100:
+        return "Purple"
+    elif r < 150 and g >= 150 and b < 150:
+        return "Lime"
+    elif r < 100 and g >= 100 and b >= 150:
+        return "Teal"
+    else:
+        # Return hex for ambiguous colors
+        return f"#{r:02X}{g:02X}{b:02X}"
+
+
 def setup_logging(level: str = 'INFO'):
     logging.basicConfig(
         level=getattr(logging, level),
@@ -856,10 +921,13 @@ def run_measurement(
     else:
         logger.info("Using mask-based width measurement")
 
+    # Generate colors for clusters (same as visualization)
+    cluster_colors = generate_cluster_colors(len(clusters))
+
     # Measure each cluster
     measurements = []
 
-    for cluster in clusters:
+    for idx, cluster in enumerate(clusters):
         measurement = measure_cluster(
             cluster,
             crack_points_lookup,
@@ -870,10 +938,20 @@ def run_measurement(
             rgb_path,
             use_edge_width
         )
+
+        # Add color information
+        color_rgb = cluster_colors[idx] if idx < len(cluster_colors) else (128, 128, 128)
+        color_name = rgb_to_color_name(color_rgb)
+        measurement['color'] = {
+            'rgb': list(color_rgb),
+            'hex': f"#{color_rgb[0]:02X}{color_rgb[1]:02X}{color_rgb[2]:02X}",
+            'name': color_name
+        }
+
         measurements.append(measurement)
 
         logger.info(
-            f"Cluster {measurement['cluster_id']}: "
+            f"Cluster {measurement['cluster_id']} ({color_name}): "
             f"L={measurement['total_length_mm']:.1f}mm, "
             f"W_avg={measurement['avg_width_mm']:.2f}mm, "
             f"W_max={measurement['max_width_mm']:.2f}mm"
