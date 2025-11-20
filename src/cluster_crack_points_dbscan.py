@@ -742,6 +742,32 @@ def run_dbscan_clustering(
     for i, cluster in enumerate(clusters):
         cluster['cluster_id'] = i
 
+    # DEBUG: Check for duplicate point_ids across clusters
+    all_point_ids = []
+    for cluster in clusters:
+        all_point_ids.extend(cluster['point_ids'])
+
+    unique_point_ids = set(all_point_ids)
+    if len(all_point_ids) != len(unique_point_ids):
+        duplicate_count = len(all_point_ids) - len(unique_point_ids)
+        logger.warning(f"⚠️ Found {duplicate_count} duplicate point_ids across clusters!")
+
+        # Find which clusters share points
+        from collections import Counter
+        point_counter = Counter(all_point_ids)
+        duplicates = {pid: count for pid, count in point_counter.items() if count > 1}
+        logger.warning(f"  Duplicate point_ids: {list(duplicates.keys())[:10]}...")
+
+        # Find clusters with overlapping centroids
+        for i in range(len(clusters)):
+            for j in range(i + 1, len(clusters)):
+                dist = np.linalg.norm(
+                    np.array(clusters[i]['centroid_3d']) - np.array(clusters[j]['centroid_3d'])
+                )
+                if dist < 0.05:  # 5cm
+                    shared = set(clusters[i]['point_ids']) & set(clusters[j]['point_ids'])
+                    logger.warning(f"  Clusters {i} and {j}: dist={dist:.3f}m, shared_points={len(shared)}")
+
     # Statistics
     logger.info("=" * 80)
     logger.info("Clustering Statistics")
