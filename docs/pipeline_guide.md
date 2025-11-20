@@ -197,17 +197,36 @@ python -m src.cluster_crack_points_dbscan \
     --output outputs/crack_clusters.json \
     --output-ply outputs/clustered_cracks.ply \
     --eps 0.05 \
-    --min-samples 10
+    --min-samples 10 \
+    --merge-distance 0.1 \
+    --merge-angle 30
 ```
 
 ### 왜 필요한가?
 - 여러 균열이 섞여 있는 포인트들을 개별 균열로 분리
 - 각 균열별로 측정 수행 가능
 - 공간적으로 가까운 포인트들을 같은 균열로 그룹화
+- 방향이 유사한 클러스터는 병합하여 sparse로 끊긴 균열 복원
 
 ### 주요 파라미터
+
+**Stage 1: DBSCAN**
 - `--eps`: 같은 클러스터로 볼 최대 거리 (meters, 기본 0.05 = 5cm)
-- `--min-samples`: 클러스터로 인정할 최소 포인트 수
+- `--min-samples`: 클러스터로 인정할 최소 포인트 수 (기본 10)
+
+**Stage 2: 방향 인식 병합**
+- `--merge-distance`: 병합 고려할 최대 중심점 거리 (meters, 기본 0.1 = 10cm)
+- `--merge-angle`: 병합할 최대 주축 각도 차이 (degrees, 기본 30°)
+- `--no-merge`: Stage 2 비활성화 (DBSCAN만 수행)
+
+### 파라미터 조절 가이드
+
+| 상황 | 권장 설정 |
+|------|-----------|
+| 균열이 너무 많이 분리됨 | `--eps` 증가, `--merge-distance` 증가 |
+| 서로 다른 균열이 합쳐짐 | `--eps` 감소, `--merge-angle` 감소 |
+| Sparse로 끊긴 균열 병합 | `--merge-distance` 증가, `--merge-angle` 유지 |
+| 보수적 클러스터링 | `--no-merge` 사용 |
 
 ---
 
@@ -316,12 +335,13 @@ python -m src.point_cloud_overlay \
     --output outputs/sfm_masked_cloud.ply \
     --output-json outputs/crack_points.json
 
-# Phase 4: DBSCAN Clustering
+# Phase 4: DBSCAN Clustering (with direction-aware merging)
 python -m src.cluster_crack_points_dbscan \
     --input outputs/crack_points.json \
     --output outputs/crack_clusters.json \
     --output-ply outputs/clustered_cracks.ply \
-    --eps 0.05 --min-samples 10
+    --eps 0.05 --min-samples 10 \
+    --merge-distance 0.1 --merge-angle 30
 
 # Phase 5: Measurement
 python -m src.measure_clusters \
