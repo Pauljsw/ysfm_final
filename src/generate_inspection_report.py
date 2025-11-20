@@ -360,12 +360,20 @@ def load_measurements(measurements_path: Path) -> Dict[int, Dict]:
     return {m['cluster_id']: m for m in measurements}
 
 
-def get_cluster_line(cluster: Dict, crack_points_lookup: Dict,
-                     centroid: np.ndarray, principal_axes: np.ndarray) -> Optional[np.ndarray]:
+def get_cluster_polyline(cluster: Dict, crack_points_lookup: Dict,
+                         drop_axis: int = 2) -> Optional[np.ndarray]:
     """
-    Get 2D line representation of a cluster.
+    Get 2D polyline representation of a cluster.
 
-    Projects cluster points to 2D and fits a line through them.
+    Projects cluster points to 2D and orders them along principal axis.
+
+    Args:
+        cluster: Cluster dict with point_ids
+        crack_points_lookup: point_id -> point dict
+        drop_axis: Axis to drop (0=X, 1=Y, 2=Z). Default Z for front view.
+
+    Returns:
+        Nx2 array of ordered 2D points for polyline
     """
     point_ids = cluster.get('point_ids', [])
 
@@ -382,10 +390,11 @@ def get_cluster_line(cluster: Dict, crack_points_lookup: Dict,
 
     xyz = np.array(xyz_list)
 
-    # Project to 2D
-    points_2d = project_to_plane(xyz, centroid, principal_axes)
+    # Simple 2D projection by dropping one axis
+    axes_to_keep = [i for i in range(3) if i != drop_axis]
+    points_2d = xyz[:, axes_to_keep]
 
-    # Fit line through points using PCA
+    # Order points along principal axis for smooth polyline
     if len(points_2d) >= 2:
         pca = PCA(n_components=1)
         pca.fit(points_2d)
@@ -393,60 +402,91 @@ def get_cluster_line(cluster: Dict, crack_points_lookup: Dict,
         center = points_2d.mean(axis=0)
         direction = pca.components_[0]
 
-        # Project points onto line to find endpoints
+        # Project to principal axis and sort
         projections = np.dot(points_2d - center, direction)
-        min_proj, max_proj = projections.min(), projections.max()
+        sorted_indices = np.argsort(projections)
 
-        start = center + min_proj * direction
-        end = center + max_proj * direction
+        return points_2d[sorted_indices]
 
-        return np.array([start, end])
-
-    return None
+    return points_2d
 
 
 def generate_inspection_diagram(
-    wall_boundary: np.ndarray,
-    crack_lines: List[Tuple[int, np.ndarray]],
+    crack_polylines: List[Tuple[int, np.ndarray]],
     output_path: Path,
-    title: str = "Inspection Diagram",
-    figsize: Tuple[int, int] = (12, 10)
+    title: str = "Wall Inspection Diagram",
+    figsize: Tuple[int, int] = (14, 10),
+    margin_ratio: float = 0.1
 ):
     """
-    Generate inspection diagram image.
+    Generate inspection diagram image with clean rectangular boundary.
 
     Args:
-        wall_boundary: Nx2 array of boundary points
-        crack_lines: List of (cluster_id, line_points) tuples
+        crack_polylines: List of (cluster_id, polyline_points) tuples
         output_path: Output image path
         title: Plot title
         figsize: Figure size
+        margin_ratio: Margin around cracks as ratio of extent
     """
-    fig, ax = plt.subplots(1, 1, figsize=figsize)
+    fig, ax = plt.subplots(1, 1, figsize=figsize, facecolor='white')
 
-    # Draw wall boundary
-    if len(wall_boundary) >= 3:
-        # Close the polygon
-        boundary_closed = np.vstack([wall_boundary, wall_boundary[0]])
-        ax.plot(boundary_closed[:, 0], boundary_closed[:, 1],
-                'k-', linewidth=2, label='Wall boundary')
-        ax.fill(wall_boundary[:, 0], wall_boundary[:, 1],
-                alpha=0.1, color='gray')
+    # Collect all crack points to determine bounding box
+    all_points = []
+    for cluster_id, polyline in crack_polylines:
+        if polyline is not None and len(polyline) >= 2:
+            all_points.extend(polyline.tolist())
 
-    # Draw cracks
-    colors = plt.cm.tab10(np.linspace(0, 1, max(10, len(crack_lines))))
+    if not all_points:
+        logger.warning("No crack points to draw")
+        plt.close()
+        return
 
-    for i, (cluster_id, line) in enumerate(crack_lines):
-        if line is not None and len(line) >= 2:
+    all_points = np.array(all_points)
+
+    # Calculate bounding box with margin
+    x_min, y_min = all_points.min(axis=0)
+    x_max, y_max = all_points.max(axis=0)
+
+    x_range = x_max - x_min
+    y_range = y_max - y_min
+
+    margin_x = x_range * margin_ratio
+    margin_y = y_range * margin_ratio
+
+    # Wall boundary as clean rectangle
+    wall_rect = np.array([
+        [x_min - margin_x, y_min - margin_y],
+        [x_max + margin_x, y_min - margin_y],
+        [x_max + margin_x, y_max + margin_y],
+        [x_min - margin_x, y_max + margin_y],
+        [x_min - margin_x, y_min - margin_y]  # Close rectangle
+    ])
+
+    # Draw wall boundary (clean rectangle)
+    ax.plot(wall_rect[:, 0], wall_rect[:, 1],
+            'k-', linewidth=3)
+    ax.fill(wall_rect[:-1, 0], wall_rect[:-1, 1],
+            alpha=0.05, color='lightgray')
+
+    # Draw cracks as polylines
+    n_cracks = len(crack_polylines)
+    colors = plt.cm.Set1(np.linspace(0, 1, max(9, n_cracks)))
+
+    for i, (cluster_id, polyline) in enumerate(crack_polylines):
+        if polyline is not None and len(polyline) >= 2:
             color = colors[i % len(colors)]
-            ax.plot(line[:, 0], line[:, 1],
-                    linewidth=3, color=color,
-                    label=f'Crack {cluster_id + 1}')
 
-            # Add label at midpoint
-            mid = line.mean(axis=0)
-            ax.annotate(f'{cluster_id + 1}', mid,
-                       fontsize=10, fontweight='bold',
+            # Draw polyline (smooth crack line)
+            ax.plot(polyline[:, 0], polyline[:, 1],
+                    linewidth=2.5, color=color, solid_capstyle='round')
+
+            # Add label near start of crack
+            label_pos = polyline[len(polyline)//2]  # Middle point
+            ax.annotate(f'{cluster_id + 1}',
+                       xy=label_pos,
+                       xytext=(5, 5),
+                       textcoords='offset points',
+                       fontsize=9, fontweight='bold',
                        ha='center', va='bottom',
                        color=color)
 
@@ -507,8 +547,6 @@ def main():
     parser = argparse.ArgumentParser(
         description='Generate 2D inspection diagram and measurement table'
     )
-    parser.add_argument('--point-cloud', type=str, required=True,
-                        help='Path to SfM point cloud PLY file')
     parser.add_argument('--clusters', type=str, required=True,
                         help='Path to crack clusters JSON')
     parser.add_argument('--crack-points', type=str, required=True,
@@ -521,21 +559,8 @@ def main():
                         help='Output diagram filename')
     parser.add_argument('--table-name', type=str, default='measurement_table.csv',
                         help='Output table filename')
-
-    # Filtering parameters
-    parser.add_argument('--noise-k', type=int, default=20,
-                        help='K neighbors for statistical filtering')
-    parser.add_argument('--noise-std', type=float, default=2.0,
-                        help='Std ratio for statistical filtering')
-    parser.add_argument('--density-grid', type=float, default=0.1,
-                        help='Grid size for density filtering')
-    parser.add_argument('--density-min', type=int, default=3,
-                        help='Min points per cell for density filtering')
-
-    # Boundary parameters
-    parser.add_argument('--boundary-grid', type=float, default=0.05,
-                        help='Grid size for boundary extraction')
-
+    parser.add_argument('--drop-axis', type=int, default=2, choices=[0, 1, 2],
+                        help='Axis to drop for 2D projection (0=X, 1=Y, 2=Z). Default: 2 (front view)')
     parser.add_argument('--log-level', type=str, default='INFO',
                         choices=['DEBUG', 'INFO', 'WARNING', 'ERROR'],
                         help='Logging level')
@@ -553,27 +578,6 @@ def main():
     output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    # Load point cloud
-    logger.info(f"Loading point cloud: {args.point_cloud}")
-    points = load_ply(Path(args.point_cloud))
-
-    # Filter noise
-    logger.info("Filtering noise...")
-    points = filter_noise_statistical(points, k=args.noise_k, std_ratio=args.noise_std)
-    points = filter_noise_density(points, grid_size=args.density_grid, min_count=args.density_min)
-
-    # Fit plane
-    logger.info("Fitting plane...")
-    centroid, normal, principal_axes = fit_plane_pca(points)
-
-    # Project to 2D
-    logger.info("Projecting to 2D...")
-    points_2d = project_to_plane(points, centroid, principal_axes)
-
-    # Extract boundary
-    logger.info("Extracting boundary...")
-    boundary = extract_boundary_grid(points_2d, grid_size=args.boundary_grid)
-
     # Load cluster data
     logger.info(f"Loading clusters: {args.clusters}")
     clusters = load_clusters(Path(args.clusters))
@@ -584,22 +588,22 @@ def main():
     logger.info(f"Loading measurements: {args.measurements}")
     measurements = load_measurements(Path(args.measurements))
 
-    # Get crack lines
-    logger.info("Generating crack lines...")
-    crack_lines = []
+    # Get crack polylines (simple XY projection)
+    logger.info(f"Generating crack polylines (dropping axis {args.drop_axis})...")
+    crack_polylines = []
     for cluster in clusters:
         cluster_id = cluster.get('cluster_id', 0)
-        line = get_cluster_line(cluster, crack_points_lookup, centroid, principal_axes)
-        if line is not None:
-            crack_lines.append((cluster_id, line))
+        polyline = get_cluster_polyline(cluster, crack_points_lookup, drop_axis=args.drop_axis)
+        if polyline is not None:
+            crack_polylines.append((cluster_id, polyline))
 
-    logger.info(f"Generated {len(crack_lines)} crack lines")
+    logger.info(f"Generated {len(crack_polylines)} crack polylines")
 
     # Generate outputs
     diagram_path = output_dir / args.diagram_name
     table_path = output_dir / args.table_name
 
-    generate_inspection_diagram(boundary, crack_lines, diagram_path)
+    generate_inspection_diagram(crack_polylines, diagram_path)
     generate_measurement_table(measurements, table_path)
 
     logger.info("="*60)
