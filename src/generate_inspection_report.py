@@ -37,19 +37,37 @@ def load_ply(ply_path: Path) -> np.ndarray:
     """
     import struct
 
+    # Property type sizes in bytes
+    type_sizes = {
+        'char': 1, 'uchar': 1, 'int8': 1, 'uint8': 1,
+        'short': 2, 'ushort': 2, 'int16': 2, 'uint16': 2,
+        'int': 4, 'uint': 4, 'int32': 4, 'uint32': 4,
+        'float': 4, 'float32': 4,
+        'double': 8, 'float64': 8
+    }
+
     with open(ply_path, 'rb') as f:
         # Read header
-        header_lines = []
         vertex_count = 0
         is_binary = False
         is_little_endian = True
+        vertex_properties = []
+        in_vertex_element = False
 
         while True:
             line = f.readline().decode('ascii').strip()
-            header_lines.append(line)
 
             if line.startswith('element vertex'):
                 vertex_count = int(line.split()[-1])
+                in_vertex_element = True
+            elif line.startswith('element') and in_vertex_element:
+                in_vertex_element = False
+            elif line.startswith('property') and in_vertex_element:
+                parts = line.split()
+                if len(parts) >= 3:
+                    prop_type = parts[1]
+                    prop_name = parts[2]
+                    vertex_properties.append((prop_name, prop_type))
             elif line.startswith('format'):
                 if 'binary_little_endian' in line:
                     is_binary = True
@@ -60,26 +78,25 @@ def load_ply(ply_path: Path) -> np.ndarray:
             elif line == 'end_header':
                 break
 
+        # Calculate vertex size
+        vertex_size = sum(type_sizes.get(prop[1], 4) for prop in vertex_properties)
+        if vertex_size == 0:
+            vertex_size = 12  # Default: just xyz floats
+
         if is_binary:
             # Binary format
             endian = '<' if is_little_endian else '>'
             points = []
 
-            # Assume float32 for x, y, z (most common)
-            # Skip other properties by reading full vertex size
-            # For simplicity, assume x,y,z are first 3 floats
             for _ in range(vertex_count):
-                data = f.read(12)  # 3 floats * 4 bytes
-                if len(data) < 12:
+                data = f.read(vertex_size)
+                if len(data) < vertex_size:
                     break
-                x, y, z = struct.unpack(f'{endian}fff', data)
+                # First 3 floats are x, y, z
+                x, y, z = struct.unpack(f'{endian}fff', data[:12])
                 points.append([x, y, z])
 
-                # Skip remaining vertex data if any (colors, normals, etc.)
-                # This is a simplification - may need adjustment for specific PLY formats
-
-            logger.info(f"Loaded {len(points)} points from {ply_path} (binary)")
-            return np.array(points)
+            points = np.array(points)
         else:
             # ASCII format
             points = []
@@ -92,9 +109,18 @@ def load_ply(ply_path: Path) -> np.ndarray:
                         points.append([x, y, z])
                     except ValueError:
                         continue
+            points = np.array(points)
 
-            logger.info(f"Loaded {len(points)} points from {ply_path} (ASCII)")
-            return np.array(points)
+        # Filter NaN and Inf values
+        if len(points) > 0:
+            valid_mask = np.all(np.isfinite(points), axis=1)
+            n_invalid = np.sum(~valid_mask)
+            if n_invalid > 0:
+                logger.warning(f"Removed {n_invalid} points with NaN/Inf values")
+            points = points[valid_mask]
+
+        logger.info(f"Loaded {len(points)} points from {ply_path}")
+        return points
 
 
 def filter_noise_statistical(points: np.ndarray, k: int = 20, std_ratio: float = 2.0) -> np.ndarray:
