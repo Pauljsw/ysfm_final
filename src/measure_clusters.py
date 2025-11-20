@@ -36,16 +36,26 @@ def generate_cluster_colors(n_clusters: int) -> List[Tuple[int, int, int]]:
     """
     Generate distinct colors for clusters using HSV color space.
     Must match cluster_crack_points_dbscan.py for consistency.
+    Uses golden ratio and varying saturation/value to avoid duplicates.
     """
     if n_clusters == 0:
         return []
 
     colors = []
     for i in range(n_clusters):
-        hue = i / n_clusters
+        # Vary hue across the spectrum using golden ratio
+        hue = (i * 0.618033988749895) % 1.0
+
+        # Vary saturation and value for more distinction
+        sat_idx = (i // 12) % 3
+        saturation = [1.0, 0.7, 0.85][sat_idx]
+        value = [1.0, 0.9, 0.95][sat_idx]
+
+        # HSV to RGB conversion
         h = hue * 6
-        c = 1.0
-        x = 1 - abs(h % 2 - 1)
+        c = value * saturation
+        x = c * (1 - abs(h % 2 - 1))
+        m = value - c
 
         if h < 1:
             r, g, b = c, x, 0
@@ -60,7 +70,7 @@ def generate_cluster_colors(n_clusters: int) -> List[Tuple[int, int, int]]:
         else:
             r, g, b = c, 0, x
 
-        colors.append((int(r * 255), int(g * 255), int(b * 255)))
+        colors.append((int((r + m) * 255), int((g + m) * 255), int((b + m) * 255)))
 
     return colors
 

@@ -27,6 +27,7 @@ logger = logging.getLogger(__name__)
 def generate_cluster_colors(n_clusters: int) -> List[Tuple[int, int, int]]:
     """
     Generate distinct colors for clusters using HSV color space.
+    Uses varying saturation and value to avoid duplicates.
 
     Args:
         n_clusters: Number of clusters
@@ -38,13 +39,23 @@ def generate_cluster_colors(n_clusters: int) -> List[Tuple[int, int, int]]:
         return []
 
     colors = []
+
+    # For more clusters, vary saturation and value as well
+    # This creates more distinct colors
     for i in range(n_clusters):
-        hue = i / n_clusters
+        # Vary hue across the spectrum
+        hue = (i * 0.618033988749895) % 1.0  # Golden ratio for better distribution
+
+        # Vary saturation and value for more distinction
+        sat_idx = (i // 12) % 3
+        saturation = [1.0, 0.7, 0.85][sat_idx]
+        value = [1.0, 0.9, 0.95][sat_idx]
 
         # HSV to RGB conversion
         h = hue * 6
-        c = 1.0
-        x = 1 - abs(h % 2 - 1)
+        c = value * saturation
+        x = c * (1 - abs(h % 2 - 1))
+        m = value - c
 
         if h < 1:
             r, g, b = c, x, 0
@@ -59,7 +70,7 @@ def generate_cluster_colors(n_clusters: int) -> List[Tuple[int, int, int]]:
         else:
             r, g, b = c, 0, x
 
-        colors.append((int(r * 255), int(g * 255), int(b * 255)))
+        colors.append((int((r + m) * 255), int((g + m) * 255), int((b + m) * 255)))
 
     return colors
 
@@ -112,16 +123,168 @@ def compute_principal_axis(points: np.ndarray) -> np.ndarray:
         return np.array([1.0, 0.0, 0.0])
 
 
+def angle_between_axes(axis1: np.ndarray, axis2: np.ndarray) -> float:
+    """
+    Compute angle between two axes (0 to 90 degrees).
+    Since crack direction can be flipped, we use absolute cosine.
+    """
+    cos_angle = abs(np.dot(axis1, axis2))
+    cos_angle = min(1.0, cos_angle)  # Numerical stability
+    return np.degrees(np.arccos(cos_angle))
+
+
+def merge_clusters_by_direction(
+    clusters: List[Dict],
+    crack_points: List[Dict],
+    merge_distance: float = 0.1,
+    merge_angle_threshold: float = 30.0
+) -> List[Dict]:
+    """
+    Stage 2: Merge clusters with similar principal axis directions.
+
+    Args:
+        clusters: List of cluster dicts from stage 1
+        crack_points: Original crack points list
+        merge_distance: Max centroid distance to consider merging (meters)
+        merge_angle_threshold: Max angle difference to merge (degrees)
+
+    Returns:
+        List of merged clusters
+    """
+    if len(clusters) <= 1:
+        return clusters
+
+    # Build point lookup
+    point_lookup = {p['point_id']: p for p in crack_points}
+
+    # Extract centroids and axes
+    n_clusters = len(clusters)
+    centroids = np.array([c['centroid_3d'] for c in clusters])
+    axes = np.array([c['principal_axis'] for c in clusters])
+
+    # Union-Find for merging
+    parent = list(range(n_clusters))
+
+    def find(x):
+        if parent[x] != x:
+            parent[x] = find(parent[x])
+        return parent[x]
+
+    def union(x, y):
+        px, py = find(x), find(y)
+        if px != py:
+            parent[px] = py
+
+    # Find pairs to merge
+    for i in range(n_clusters):
+        for j in range(i + 1, n_clusters):
+            # Check distance
+            dist = np.linalg.norm(centroids[i] - centroids[j])
+            if dist > merge_distance:
+                continue
+
+            # Check angle
+            angle = angle_between_axes(axes[i], axes[j])
+            if angle <= merge_angle_threshold:
+                union(i, j)
+                logger.debug(f"Merging cluster {i} and {j}: dist={dist:.3f}m, angle={angle:.1f}°")
+
+    # Group clusters by their root
+    groups = {}
+    for i in range(n_clusters):
+        root = find(i)
+        if root not in groups:
+            groups[root] = []
+        groups[root].append(i)
+
+    # Create merged clusters
+    merged_clusters = []
+    for root, indices in groups.items():
+        if len(indices) == 1:
+            # No merge needed
+            merged_clusters.append(clusters[indices[0]])
+        else:
+            # Merge multiple clusters
+            merged_point_ids = []
+            merged_source_masks_map = {}
+
+            for idx in indices:
+                c = clusters[idx]
+                merged_point_ids.extend(c['point_ids'])
+
+                for sm in c['source_masks']:
+                    key = (sm['image_id'], sm['mask_id'])
+                    if key not in merged_source_masks_map:
+                        merged_source_masks_map[key] = {
+                            'n_points': 0,
+                            'confidence_sum': 0.0
+                        }
+                    merged_source_masks_map[key]['n_points'] += sm['n_points']
+                    merged_source_masks_map[key]['confidence_sum'] += sm['avg_confidence'] * sm['n_points']
+
+            # Rebuild cluster properties
+            merged_xyz = np.array([point_lookup[pid]['xyz'] for pid in merged_point_ids if pid in point_lookup])
+            merged_centroid = np.mean(merged_xyz, axis=0)
+            merged_bbox_min = np.min(merged_xyz, axis=0)
+            merged_bbox_max = np.max(merged_xyz, axis=0)
+            merged_axis = compute_principal_axis(merged_xyz)
+
+            # Rebuild source masks list
+            source_masks = []
+            for (image_id, mask_id), info in merged_source_masks_map.items():
+                source_masks.append({
+                    'image_id': image_id,
+                    'mask_id': mask_id,
+                    'n_points': info['n_points'],
+                    'avg_confidence': info['confidence_sum'] / info['n_points']
+                })
+            source_masks.sort(key=lambda x: x['n_points'], reverse=True)
+
+            # Compute average confidence
+            merged_points = [point_lookup[pid] for pid in merged_point_ids if pid in point_lookup]
+            avg_confidence = np.mean([p['avg_confidence'] for p in merged_points])
+
+            merged_cluster = {
+                'cluster_id': root,  # Will be reassigned later
+                'n_points': len(merged_point_ids),
+                'point_ids': merged_point_ids,
+                'centroid_3d': merged_centroid.tolist(),
+                'bbox_3d': {
+                    'min': merged_bbox_min.tolist(),
+                    'max': merged_bbox_max.tolist()
+                },
+                'principal_axis': merged_axis.tolist(),
+                'source_masks': source_masks,
+                'n_source_masks': len(source_masks),
+                'n_views': len(set(s['image_id'] for s in source_masks)),
+                'avg_confidence': float(avg_confidence),
+                'merged_from': indices
+            }
+            merged_clusters.append(merged_cluster)
+
+    n_merged = n_clusters - len(merged_clusters)
+    if n_merged > 0:
+        logger.info(f"  Merged {n_merged} clusters (direction-aware)")
+
+    return merged_clusters
+
+
 def run_dbscan_clustering(
     input_json: str,
     output_json: str,
     eps: float = 0.05,
     min_samples: int = 10,
     output_ply: str = None,
-    show_noise: bool = False
+    show_noise: bool = False,
+    merge_distance: float = 0.1,
+    merge_angle: float = 30.0,
+    no_merge: bool = False
 ):
     """
-    Run DBSCAN clustering on crack points.
+    Run DBSCAN clustering on crack points with direction-aware merging.
+
+    Stage 1: DBSCAN clustering
+    Stage 2: Merge clusters with similar principal axis (if not disabled)
 
     Args:
         input_json: Input crack_points.json path
@@ -130,6 +293,9 @@ def run_dbscan_clustering(
         min_samples: DBSCAN minimum samples per cluster
         output_ply: Output PLY path for visualization (optional)
         show_noise: Whether to show noise points in PLY (gray)
+        merge_distance: Max centroid distance to consider merging (meters)
+        merge_angle: Max angle difference to merge clusters (degrees)
+        no_merge: Disable direction-aware merging (Stage 2)
     """
     logger.info("=" * 80)
     logger.info("DBSCAN Clustering for Crack Points")
@@ -237,8 +403,20 @@ def run_dbscan_clustering(
         logger.debug(f"  Cluster {cluster_id}: {len(cluster_points)} points, "
                      f"{len(source_masks)} source masks, {cluster_entry['n_views']} views")
 
-    # Sort clusters by n_points
-    clusters.sort(key=lambda x: x['n_points'], reverse=True)
+    # Stage 2: Direction-aware merging
+    if not no_merge and len(clusters) > 1:
+        logger.info(f"Stage 2: Direction-aware merging (distance={merge_distance}m, angle={merge_angle}°)...")
+        clusters = merge_clusters_by_direction(
+            clusters, crack_points, merge_distance, merge_angle
+        )
+        n_clusters = len(clusters)
+
+    # Sort clusters by X coordinate (left to right)
+    clusters.sort(key=lambda x: x['centroid_3d'][0])
+
+    # Reassign cluster IDs after sorting
+    for i, cluster in enumerate(clusters):
+        cluster['cluster_id'] = i
 
     # Statistics
     logger.info("=" * 80)
@@ -264,6 +442,10 @@ def run_dbscan_clustering(
             'noise_points': n_noise,
             'dbscan_eps': eps,
             'dbscan_min_samples': min_samples,
+            'merge_enabled': not no_merge,
+            'merge_distance': merge_distance,
+            'merge_angle': merge_angle,
+            'sorted_by': 'x_coordinate',
             'input_metadata': metadata
         },
         'clusters': clusters
@@ -344,6 +526,12 @@ if __name__ == '__main__':
                        help='Output PLY path for cluster visualization (optional)')
     parser.add_argument('--show-noise', action='store_true',
                        help='Show noise points in gray in PLY output')
+    parser.add_argument('--merge-distance', type=float, default=0.1,
+                       help='Max centroid distance for direction-aware merging (meters, default: 0.1)')
+    parser.add_argument('--merge-angle', type=float, default=30.0,
+                       help='Max angle difference for merging clusters (degrees, default: 30)')
+    parser.add_argument('--no-merge', action='store_true',
+                       help='Disable direction-aware merging (Stage 2)')
     parser.add_argument('--log-level', default='INFO',
                        choices=['DEBUG', 'INFO', 'WARNING', 'ERROR'])
 
@@ -358,7 +546,10 @@ if __name__ == '__main__':
             args.eps,
             args.min_samples,
             args.output_ply,
-            args.show_noise
+            args.show_noise,
+            args.merge_distance,
+            args.merge_angle,
+            args.no_merge
         )
 
         if clusters:
