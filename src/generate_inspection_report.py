@@ -546,7 +546,8 @@ def generate_inspection_diagram(
                        color=color)
 
     ax.set_aspect('equal')
-    ax.axis('off')
+    ax.set_xticklabels([])
+    ax.set_yticklabels([])
 
     plt.tight_layout()
     plt.savefig(output_path, dpi=150, bbox_inches='tight')
@@ -660,7 +661,8 @@ def generate_combined_report(
                               fontsize=8, fontweight='bold', color=color)
 
     ax_diagram.set_aspect('equal')
-    ax_diagram.axis('off')
+    ax_diagram.set_xticklabels([])
+    ax_diagram.set_yticklabels([])
 
     # Right: Table (35% width)
     ax_table = fig.add_axes([0.58, 0.1, 0.38, 0.8])
