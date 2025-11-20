@@ -598,6 +598,128 @@ def generate_measurement_table(
     print("="*60 + "\n")
 
 
+def generate_combined_report(
+    crack_polylines: List[Tuple[int, np.ndarray]],
+    measurements: Dict[int, Dict],
+    output_path: Path,
+    title: str = "Wall Inspection Report",
+    figsize: Tuple[int, int] = (20, 12)
+):
+    """
+    Generate combined report with diagram on left and table on right.
+    """
+    fig = plt.figure(figsize=figsize, facecolor='white')
+
+    # Left: Diagram (60% width)
+    ax_diagram = fig.add_axes([0.05, 0.1, 0.5, 0.8])
+
+    # Collect all points for bounding box
+    all_points = []
+    for item in crack_polylines:
+        polyline = item[1]
+        if polyline is not None and len(polyline) >= 2:
+            all_points.extend(polyline.tolist())
+
+    if not all_points:
+        logger.warning("No crack points to draw")
+        plt.close()
+        return
+
+    all_points = np.array(all_points)
+
+    # Calculate bounding box
+    x_min, y_min = all_points.min(axis=0)
+    x_max, y_max = all_points.max(axis=0)
+    x_range = x_max - x_min
+    y_range = y_max - y_min
+    margin_x = x_range * 0.1
+    margin_y = y_range * 0.1
+
+    # Wall boundary
+    wall_rect = np.array([
+        [x_min - margin_x, y_min - margin_y],
+        [x_max + margin_x, y_min - margin_y],
+        [x_max + margin_x, y_max + margin_y],
+        [x_min - margin_x, y_max + margin_y],
+        [x_min - margin_x, y_min - margin_y]
+    ])
+
+    ax_diagram.plot(wall_rect[:, 0], wall_rect[:, 1], 'k-', linewidth=2)
+    ax_diagram.fill(wall_rect[:-1, 0], wall_rect[:-1, 1], alpha=0.05, color='lightgray')
+
+    # Draw cracks
+    for item in crack_polylines:
+        if len(item) == 3:
+            cluster_id, polyline, color = item
+        else:
+            cluster_id, polyline = item
+            color = 'red'
+
+        if polyline is not None and len(polyline) >= 2:
+            ax_diagram.plot(polyline[:, 0], polyline[:, 1],
+                          linewidth=2, color=color, solid_capstyle='round')
+            label_pos = polyline[len(polyline)//2]
+            ax_diagram.annotate(f'{cluster_id + 1}', xy=label_pos,
+                              xytext=(3, 3), textcoords='offset points',
+                              fontsize=8, fontweight='bold', color=color)
+
+    ax_diagram.set_aspect('equal')
+    ax_diagram.set_xlabel('X (m)', fontsize=10)
+    ax_diagram.set_ylabel('Y (m)', fontsize=10)
+    ax_diagram.set_title('Crack Location Diagram', fontsize=12, fontweight='bold')
+    ax_diagram.grid(True, alpha=0.3)
+
+    # Right: Table (35% width)
+    ax_table = fig.add_axes([0.58, 0.1, 0.38, 0.8])
+    ax_table.axis('off')
+
+    # Prepare table data
+    table_data = [['No.', 'Type', 'Width\n(mm)', 'Length\n(mm)']]
+    for cluster_id in sorted(measurements.keys()):
+        m = measurements[cluster_id]
+        table_data.append([
+            f'{cluster_id + 1}',
+            'Crack',
+            f"{m.get('avg_width_mm', 0):.2f}",
+            f"{m.get('total_length_mm', 0):.1f}"
+        ])
+
+    # Create table
+    table = ax_table.table(
+        cellText=table_data,
+        loc='center',
+        cellLoc='center',
+        colWidths=[0.15, 0.2, 0.25, 0.25]
+    )
+
+    # Style table
+    table.auto_set_font_size(False)
+    table.set_fontsize(9)
+    table.scale(1.2, 1.5)
+
+    # Header styling
+    for j in range(4):
+        table[(0, j)].set_facecolor('#4472C4')
+        table[(0, j)].set_text_props(color='white', fontweight='bold')
+
+    # Alternating row colors
+    for i in range(1, len(table_data)):
+        for j in range(4):
+            if i % 2 == 0:
+                table[(i, j)].set_facecolor('#E8E8E8')
+
+    ax_table.set_title('Measurement Results', fontsize=12, fontweight='bold', pad=20)
+
+    # Main title
+    fig.suptitle(title, fontsize=16, fontweight='bold', y=0.98)
+
+    # Save
+    plt.savefig(output_path, dpi=150, bbox_inches='tight', facecolor='white')
+    plt.close()
+
+    logger.info(f"Saved combined report: {output_path}")
+
+
 def main():
     parser = argparse.ArgumentParser(
         description='Generate 2D inspection diagram and measurement table'
@@ -614,6 +736,8 @@ def main():
                         help='Output diagram filename')
     parser.add_argument('--table-name', type=str, default='measurement_table.csv',
                         help='Output table filename')
+    parser.add_argument('--report-name', type=str, default='inspection_report.png',
+                        help='Output combined report filename (diagram + table)')
     parser.add_argument('--drop-axis', type=int, default=2, choices=[0, 1, 2],
                         help='Axis to drop for 2D projection (0=X, 1=Y, 2=Z). Default: 2 (front view)')
     parser.add_argument('--flip-x', action='store_true',
@@ -711,12 +835,15 @@ def main():
     # Generate outputs
     diagram_path = output_dir / args.diagram_name
     table_path = output_dir / args.table_name
+    report_path = output_dir / args.report_name
 
     generate_inspection_diagram(crack_polylines, diagram_path)
     generate_measurement_table(measurements, table_path)
+    generate_combined_report(crack_polylines, measurements, report_path)
 
     logger.info("="*60)
     logger.info("Done!")
+    logger.info(f"Combined report: {report_path}")
     logger.info("="*60)
 
 
