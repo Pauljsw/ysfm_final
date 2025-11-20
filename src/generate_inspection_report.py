@@ -323,14 +323,18 @@ def load_crack_points(crack_points_path: Path) -> Dict[int, Dict]:
         data = json.load(f)
 
     # Handle different JSON structures
+    points = None
     if isinstance(data, dict):
-        if 'crack_points' in data:
-            points = data['crack_points']
-        elif 'points' in data:
-            points = data['points']
-        else:
-            # Assume the dict values are the points
-            points = list(data.values()) if all(isinstance(v, dict) for v in data.values()) else []
+        # Try different keys
+        for key in ['points', 'crack_points']:
+            if key in data and isinstance(data[key], list):
+                points = data[key]
+                logger.debug(f"Found points under '{key}' key")
+                break
+
+        if points is None:
+            logger.error(f"crack_points.json keys: {list(data.keys())}")
+            return {}
     elif isinstance(data, list):
         points = data
     else:
