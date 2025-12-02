@@ -266,3 +266,72 @@ class YOLOSegmenter:
 
 
 __all__ = ["YOLOSegmenter"]
+
+
+if __name__ == '__main__':
+    import argparse
+
+    parser = argparse.ArgumentParser(description='YOLO Segmentation Inference')
+    parser.add_argument('--model-path', required=True, help='Path to YOLO model (.pt)')
+    parser.add_argument('--image-dir', required=True, help='Directory containing RGB images')
+    parser.add_argument('--output-dir', required=True, help='Output directory for mask JSONs')
+    parser.add_argument('--conf-threshold', type=float, default=0.25, help='Confidence threshold')
+    parser.add_argument('--iou-threshold', type=float, default=0.45, help='IoU threshold for NMS')
+    parser.add_argument('--img-size', type=int, default=1024, help='Image size for inference')
+    parser.add_argument('--device', default=None, help='Device (cuda/cpu)')
+    parser.add_argument('--viz-dir', default=None, help='Directory for visualization images')
+    parser.add_argument('--class-names', nargs='+', default=['crack'], help='Class names')
+
+    args = parser.parse_args()
+
+    # Setup logging
+    logging.basicConfig(
+        level=logging.INFO,
+        format='%(asctime)s - %(levelname)s - %(message)s'
+    )
+
+    # Check directories
+    image_dir = Path(args.image_dir)
+    if not image_dir.exists():
+        logger.error(f"❌ Image directory not found: {image_dir}")
+        logger.error(f"   Please create the directory and add RGB images (.png, .jpg)")
+        exit(1)
+
+    # Get image files
+    image_files = list(image_dir.glob('*.png')) + list(image_dir.glob('*.jpg'))
+    if not image_files:
+        logger.error(f"❌ No images found in: {image_dir}")
+        logger.error(f"   Please add .png or .jpg images to this directory")
+        exit(1)
+
+    logger.info(f"Found {len(image_files)} images in {image_dir}")
+
+    # Check model
+    model_path = Path(args.model_path)
+    if not model_path.exists():
+        logger.error(f"❌ Model not found: {model_path}")
+        exit(1)
+
+    # Initialize YOLO
+    logger.info(f"Loading YOLO model: {model_path}")
+    segmenter = YOLOSegmenter(
+        weights_path=str(model_path),
+        class_names=args.class_names,
+        conf=args.conf_threshold,
+        iou=args.iou_threshold,
+        img_size=args.img_size,
+        device=args.device,
+        visualization_dir=args.viz_dir
+    )
+
+    # Process images
+    output_dir = Path(args.output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    logger.info(f"Processing {len(image_files)} images...")
+    for i, image_path in enumerate(image_files, 1):
+        output_path = output_dir / f"{image_path.stem}.json"
+        logger.info(f"[{i}/{len(image_files)}] Processing: {image_path.name}")
+        segmenter.process_image(str(image_path), str(output_path))
+
+    logger.info(f"✅ Done! Saved {len(image_files)} mask files to {output_dir}")
